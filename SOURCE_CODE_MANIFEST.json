@@ -1,0 +1,50 @@
+[
+  {
+    "workflow_key": "heat",
+    "uploaded_name": "1. Heat up + Calibration_NEW TRY_v7.3.py",
+    "packaged_resource": "npg_chamber/legacy_scripts/01_heat_up_calibration_legacy.py",
+    "sha256": "c7d431a9f26a2b804a540492b66baba44e67f53f73c231325e73a1344fa10989",
+    "size_bytes": 149428,
+    "packaging_note": "Phase 01 retains its established QMB, pressure, oven PID monitoring, Keysight, Arduino, shutter, ramp, PID, watchdog and safety logic. It contains no 200 C oven PID startup write; that command remains specific to Phase 03. The 0.9.18 build keeps monitoring-only IMPAC IPE 140 acquisition on COM10, persistent material modes, pa-based emissivity verification, raw/sample logging and the display-only OVEN PID / PYROMETER / SAMPLE EST. selector. The selector is lifted above the dynamic graph title, and the presentation-only dashboard uses the complete right-side height and added width so Operator controls and its buttons remain separate and visible. No editable experimental value, control decision, safety limit or saved data path was removed or changed. The packaged resource is authoritative; the backup resource is the matching current recovery snapshot.",
+    "backup_resource": "original_scripts_backup/01_heat_up_calibration_legacy.py",
+    "backup_sha256": "c7d431a9f26a2b804a540492b66baba44e67f53f73c231325e73a1344fa10989",
+    "backup_size_bytes": 149428,
+    "backup_note": "Byte-for-byte recovery snapshot of the current packaged_resource. It is not imported or launched during normal operation."
+  },
+  {
+    "workflow_key": "sputter",
+    "uploaded_name": "2. Sputtering-Annealing_NEW TRY_v4.py",
+    "packaged_resource": "npg_chamber/legacy_scripts/02_sputtering_annealing_legacy.py",
+    "sha256": "46a84a1d3694dc5cbab4261e02088ce46a627c92753ff74f81eb47c498ca89f6",
+    "size_bytes": 97247,
+    "packaging_note": "Phase 02 retains direct verified COSCON UDP automation for Degas, target validation, Operate, measured-output qualification, continuous pressure/interlock/energy/emission supervision, automatic Standby, oven PID control, logging and safe-stop behavior. Version 0.9.17 removed ICN2 from the window title and reduced permanent visual density; these changes remain in 0.9.18. The main screen shows one Waiting / Ready / Check system result, while COSCON mode and the hardware interlock remain available inside Auxiliary diagnostics and continue to drive the unchanged automation, CSV log and safety logic. The active instruction, valid operator action, pressure, energy, emission, oven values and timing remain prominent. No COSCON command, recipe value, pressure limit, PID behavior or manual leak-valve responsibility changed. The packaged resource is authoritative; the backup resource is the matching current recovery snapshot.",
+    "backup_resource": "original_scripts_backup/02_sputtering_annealing_legacy.py",
+    "backup_sha256": "46a84a1d3694dc5cbab4261e02088ce46a627c92753ff74f81eb47c498ca89f6",
+    "backup_size_bytes": 97247,
+    "backup_note": "Byte-for-byte recovery snapshot of the current packaged_resource. It is not imported or launched during normal operation."
+  },
+  {
+    "workflow_key": "dpdbba",
+    "uploaded_name": "3. DP-DBBA Evaporation_v7.py",
+    "packaged_resource": "npg_chamber/legacy_scripts/03_dp_dbba_evaporation_legacy.py",
+    "sha256": "3aebff3d43415a58ea23fa97761d0d87373dc28cf439aff18bd7cd74c2c3326d",
+    "size_bytes": 166067,
+    "packaging_note": "Phase 03 retains its ratio handoff, DP-DBBA thickness target, 200 C oven PID startup setpoint, QMB, pressure, Keysight, Arduino, shutter, ramp, PID, watchdog and normal handoff logic. The 0.9.18 build keeps monitoring-only IMPAC IPE 140 acquisition on COM10, persistent material modes, pa-based emissivity verification, raw/sample logging and the display-only OVEN PID / PYROMETER / SAMPLE EST. selector, now lifted above the graph title. The dashboard uses the complete right-side height and added width. A separate Finish phase control is accepted only at WAIT_SHUTTER_CLOSE and preserves the normal Keysight-ON handoff to Phase 04. Abort / safe stop first commands and verifies an oven PID target of 0 C, then runs the controlled Keysight ramp-down/OFF path; a PID confirmation failure is reported without blocking electrical shutdown. No normal recipe value, automatic transition, safety limit or saved data path was changed. The packaged resource is authoritative; the backup resource is the matching current recovery snapshot.",
+    "backup_resource": "original_scripts_backup/03_dp_dbba_evaporation_legacy.py",
+    "backup_sha256": "3aebff3d43415a58ea23fa97761d0d87373dc28cf439aff18bd7cd74c2c3326d",
+    "backup_size_bytes": 166067,
+    "backup_note": "Byte-for-byte recovery snapshot of the current packaged_resource. It is not imported or launched during normal operation."
+  },
+  {
+    "workflow_key": "anneal",
+    "uploaded_name": "4. NPG Annealings_NEW TRY_v3.py",
+    "packaged_resource": "npg_chamber/legacy_scripts/04_npg_annealings_legacy.py",
+    "sha256": "9e78c43df4396fa78059b00b556c7c99f7df0f9cc32c17613634dd0094d45193",
+    "size_bytes": 85689,
+    "packaging_note": "Phase 04 retains its established oven PID sequence, editable stage targets/holds, CK-1 Arduino monitor, Keysight ramp-down, switch-off confirmation, abort and failsafe behavior. The pyrometer features introduced before 0.9.18 remain active: monitoring-only IMPAC IPE 140 acquisition on COM10 (38400 baud, 8E1, address 00), the shared persistent launcher material mode, pa-based emissivity readback, verified four-digit UPP emissivity setup, and the OVEN PID / PYROMETER / SAMPLE EST. display selector. Telemetry and saved comparison plots include oven, raw pyrometer and estimated sample temperatures; below-cutoff estimates are retained with an extrapolation warning. Pyrometer data never changes PID setpoints, annealing transitions, Keysight control or safety decisions. Existing data routing, run-only annealing overrides and serial cleanup remain active. The packaged resource is authoritative; the backup resource is the matching current recovery snapshot.",
+    "backup_resource": "original_scripts_backup/04_npg_annealings_legacy.py",
+    "backup_sha256": "9e78c43df4396fa78059b00b556c7c99f7df0f9cc32c17613634dd0094d45193",
+    "backup_size_bytes": 85689,
+    "backup_note": "Byte-for-byte recovery snapshot of the current packaged_resource. It is not imported or launched during normal operation."
+  }
+]
