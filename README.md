@@ -33,7 +33,7 @@ flowchart TD
 
 ## Current release
 
-The latest supported snapshot is `0.9.18`. The complete release history from `0.8.5` onward is recorded in [CHANGELOG.md](CHANGELOG.md), while the earlier March prototypes are retained under [history](history/README.md).
+The latest supported snapshot is `0.9.18`. The complete release history from `0.8.5` onward is recorded in [CHANGELOG.md](CHANGELOG.md). The [historical archive](history/README.md) now includes the March prototypes, sixteen recovered July project packages, the standalone COSCON and pyrometer diagnostics, and an explicit list of April–June files still awaiting recovery.
 
 The authoritative runtime scripts are in `npg_chamber/legacy_scripts/`. Matching recovery copies are in `original_scripts_backup/`, and their SHA-256 hashes are recorded in `SOURCE_CODE_MANIFEST.json`.
 

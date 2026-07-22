@@ -1,6 +1,6 @@
 # Project history
 
-This timeline distinguishes file-backed snapshots from milestones reconstructed from the maintained changelog and project records. It does not claim that unavailable intermediate source trees have been recovered.
+This timeline distinguishes file-backed snapshots from milestones reconstructed from the maintained changelog and project records. Sixteen July packages and the standalone July hardware diagnostics have now been recovered from their original deliverables; unavailable April–June files remain explicitly listed rather than reconstructed.
 
 ## March 2026 — Learning the chamber and preserving the starting point
 
@@ -56,9 +56,11 @@ The final codebase compiled successfully and recorded 93 passing no-hardware tes
 
 ## Snapshot policy
 
-Only two source states are currently backed by complete files:
+The private archive now contains:
 
 1. the March prototype snapshot;
-2. the integrated `0.9.18` package.
+2. sixteen source-backed July packages spanning `0.9.11`, `0.9.12`, the temporary `0.10.0` prototype, `0.9.13`–`0.9.16`, and six distinct `0.9.17` states;
+3. the standalone July pyrometer and COSCON diagnostic programs;
+4. the integrated `0.9.18` package.
 
-The intermediate releases remain documented in `CHANGELOG.md`, but they should not be represented as recovered code snapshots unless their original ZIP files or scripts are found. If more historical packages are located, each should be added as a separate archival commit and tagged with its actual internal version.
+The recovered July packages are indexed under `history/2026-07-recovered-packages/`. April–June filenames confirmed by the conversations but not recovered as bytes are tracked in `history/MISSING_SOURCE_FILES.md`. No missing file is recreated from a written description.

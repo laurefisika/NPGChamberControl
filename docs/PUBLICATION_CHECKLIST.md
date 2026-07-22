@@ -9,6 +9,7 @@ Before creating a public export:
 - [ ] Confirm contributor credits and the exact affiliation wording with the institution.
 - [ ] Select a license only after ownership is clear. Do not replace the current internal-use notice with MIT, GPL, Apache, or another open-source license without authorization.
 - [ ] Remove the laboratory COSCON IP address and use a documented local configuration or environment variable.
+- [ ] Exclude `history/2026-07-recovered-packages/archives/` and the historical COSCON diagnostics from the public export; the private source-backed files intentionally retain laboratory-local network settings.
 - [ ] Exclude manufacturer manuals, service guides, vendor software guides, equipment passwords, and any copied material that cannot legally be redistributed.
 - [ ] Review the phase explanation PDFs and screenshots for internal IPs, sample names, computer names, room information, and unpublished results.
 - [ ] Review the historical notebook output before publication; clear or replace experimental output if the results are not approved for release.
