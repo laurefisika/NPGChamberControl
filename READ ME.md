@@ -2,17 +2,47 @@
 
 **Project:** ICN2 NPG synthesis chamber workflows  
 **Package name:** `npg-chamber`  
-**Current release:** `0.9.18`  
+**Current release:** `0.9.21`
 
-### Parameter-editor usability and safer Phase 03 abort behavior in 0.9.18
 
-The **Change automatization parameters** window opens at a reduced `1100 x 800` size and can be resized or maximized normally. Long Phase 01–04 and Pyrometer tabs support mouse-wheel scrolling as well as their vertical scrollbars. The redundant **Restore validated Au/mica mode** button has been removed; the protected validated mode remains available in **Saved material modes**.
+### Selectable temperature, rate and compound feedback in 0.9.21 / project archive v15
 
-The Phase 01 and Phase 03 right panels use more of the available height and width so **Operator controls** and its buttons remain visible. Their **OVEN PID / PYROMETER / SAMPLE EST.** selectors sit above the dynamic graph titles without covering them.
+Phases **01 Heat up + Calibration** and **03 DP-DBBA Evaporation** now offer a new **Evaporation feedback mode** in **Change automatization parameters**:
 
-Phase 03 keeps **Finish phase** and **Abort / safe stop** as separate actions. Normal Finish preserves the established handoff to Phase 04. Abort first commands and verifies an oven PID target of `0.0 °C`, then continues with the independent controlled Keysight ramp-down and output-OFF sequence. A failed PID confirmation is reported but does not block the electrical safe stop.
+- **temperature** keeps the established CK-1 temperature PID unchanged and remains the packaged default until the new loop is validated on the real chamber;
+- **rate** uses the filtered CK-1 QMB rate as the primary Keysight-current feedback after a conservative temperature/rate handover;
+- **compound** uses the same rate PID but progressively suppresses positive current corrections as CK-1 approaches the editable **Rate-control temperature ceiling**. This is the recommended supervised mode for compensating fresh versus aged molecular loads.
 
-### Capabilities retained from 0.9.17
+The rate controller uses a spike-resistant trimmed average, asymmetric current limits (slower increases and faster decreases), anti-windup, a small QMB dead band and a required sequence of new in-band readings before the shutter-open prompt. After rate feedback has taken control, a stale CK-1 rate signal triggers a safe Keysight stop instead of allowing open-loop heating. The independent CK-1 temperature watchdog remains active; in rate/compound modes its reference becomes the rate-control temperature ceiling.
+
+The new rate feedback remains active during shutter waiting and throughout calibration/evaporation. In Phase 03, opening the shutter now resets only the thickness measurement window and deliberately preserves the continuous QMB rate history needed by the controller.
+
+The packaged initial rate-PID gains are deliberately conservative and must be checked with a supervised chamber test before making **compound** the laboratory default.
+Use `RATE_PID_VALIDATION.md` for the step-by-step chamber validation and tuning checklist.
+
+### Phase subprocess import correction in 0.9.21
+
+The unified launcher starts every phase inside its corresponding `Data Samples` output folder. The phase environment now places the root of the currently launched project at the beginning of `PYTHONPATH`, ensuring that imports such as `npg_chamber.common` resolve from that same v15 source tree even when the folder is renamed or moved.
+
+This corrects the Phase 03 startup error `ModuleNotFoundError: No module named 'npg_chamber'`. The correction is in the shared `legacy_runner.py`, so it protects all four phase subprocesses; the individual phase scripts and their experimental logic do not need a separate import-path workaround.
+
+### Safe 0 °C completion in 0.9.20 / project archive v14
+
+Phase 02 **Abort / Safe Stop** now attempts and verifies an oven PID setpoint of **0 °C** instead of 20 °C before completing the established COSCON and shutdown sequence.
+
+Phase 04 no longer sends a final 30 °C setpoint. After the second annealing hold, it sends the cooldown target—**0 °C by default**—holds that PID SV for **10 minutes**, and then finishes with the PID SV still at 0 °C. Phase 04 Abort / Safe Stop uses the same cooldown target. The obsolete **Final PID target** launcher field has been removed, and older saved modes containing it are migrated automatically.
+
+The **Phase sequence** block in the Phase 04 GUI has also been moved slightly lower and shortened to remain readable.
+
+### Phase 02 continuation runs in 0.9.19
+
+In **Change automatization parameters → Phase 02 → Workflow**, the checkbox **Start without initial Degas** allows a new Phase 02 execution to begin directly with the configured sputter-anneal cycles. It is intended for continuing the same chamber preparation after an earlier partial Phase 02 run, such as completing one remaining cycle on a later session.
+
+The checkbox is **off by default**. When it is enabled, Phase 02 asks for an additional preflight confirmation that the operator has verified that a new Degas is not required. The GUI marks the Degas workflow step as skipped, and the choice is recorded in the effective automation-parameter file saved with the run. Because this decision depends on the immediate physical history of the chamber, it is not retained inside reusable saved automation modes.
+
+This option does not disable any sputtering interlock: pressure, COSCON mode, hardware interlock, energy, emission confirmation and automatic return to Standby remain active.
+
+### Saved full-chamber modes, pyrometer material modes and refined operator views in 0.9.18
 
 The **Saved automation modes** tab inside **Change automatization parameters** stores complete tutor-approved chamber recipes. A mode contains every editable startup value for Phases 01–04 plus the selected pyrometer profile. Examples can be named **NPG at 600 C** or **GNR at 500 C**. Loading a mode fills every parameter tab in one step, after which the operator can still change any field for the current launcher session. Full-chamber modes are stored in:
 
@@ -255,7 +285,7 @@ npg-chamber --list
 Expected version:
 
 ```text
-0.9.18
+0.9.21
 ```
 
 ---
@@ -561,7 +591,7 @@ Operator notes:
 - keep the COSCON webpage and SpecsLab/Prodigy closed while Phase 02 is active;
 - the argon leak valve remains manual and the dashboard shows its buttons only when those actions are required;
 - supervise the run and keep access to the local COSCON controls;
-- on abort or a detected fault, the script requests a verified COSCON safe state and tries to reset the PID setpoint to 20 °C.
+- on abort or a detected fault, the script requests a verified COSCON safe state and tries to reset the PID setpoint to 0 °C.
 
 ---
 
@@ -628,6 +658,7 @@ Purpose:
 
 - runs the final NPG annealing sequence;
 - controls the oven PID setpoint through the defined stages;
+- after the second annealing hold, sends the cooldown target (0 °C by default), holds it for 10 minutes and finishes with the PID SV still at that value;
 - monitors oven PID temperature;
 - monitors the IMPAC IPE 140 raw temperature and calculated sample temperature;
 - provides the OVEN PID / PYROMETER / SAMPLE EST. live selector;
@@ -662,7 +693,8 @@ Operator notes:
 - enter the run name in the launcher GUI before starting;
 - do not leave the system unattended;
 - verify current and voltage during ramp-down;
-- confirm the evaporator/power state at the end.
+- confirm the evaporator/power state at the end;
+- normal completion and Abort / Safe Stop both leave the oven PID SV at the cooldown target (0 °C by default); there is no final 30 °C command.
 
 ---
 
@@ -793,7 +825,7 @@ npg-chamber --list
 If installing from a wheel instead of the project folder:
 
 ```bat
-python -m pip install npg_chamber-0.9.18-py3-none-any.whl
+python -m pip install npg_chamber-0.9.21-py3-none-any.whl
 ```
 
 For development and laboratory iteration, editable mode is usually easier.

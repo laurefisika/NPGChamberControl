@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "npg-chamber"
-version = "0.9.18"
+version = "0.9.21"
 description = "Installable launcher package for the ICN2 NPG synthesis chamber workflows."
 readme = "READ ME.md"
 authors = [
@@ -41,3 +41,6 @@ include = ["npg_chamber*"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["developer_tests"]

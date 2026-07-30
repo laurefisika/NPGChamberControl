@@ -73,6 +73,8 @@ from datetime import datetime
 from html import unescape
 from typing import Optional, Callable
 
+from npg_chamber.common.pressure_alarm import PressureEmergencyAlarm
+
 from npg_chamber.config.run_parameters import (
     apply_overrides_to_object,
     format_override_summary,
@@ -116,11 +118,12 @@ class RunConfig:
 
     # Chamber workflow
     cycles: int = 3
+    start_without_degassing: bool = False
     sputter_minutes: int = 20
     anneal_target_c: float = 620.0
     anneal_hold_minutes: int = 10
     anneal_reset_c: float = 0.0
-    abort_reset_c: float = 20.0
+    abort_reset_c: float = 0.0
 
     # COSCON UDP automation
     coscon_ip: str = "192.168.236.186"
@@ -136,6 +139,10 @@ class RunConfig:
     coscon_emission_a: float = 0.010
     coscon_energy_tolerance_v: float = 50.0
     coscon_emission_tolerance_a: float = 0.001
+    # A single emission spike raises a warning and is rechecked. The run is
+    # aborted only after this many consecutive out-of-tolerance measurements.
+    coscon_emission_fault_samples: int = 3
+    coscon_emission_recheck_s: float = 0.5
     coscon_stable_samples: int = 5
     pressure_min_mbar: float = 1.0e-5
     pressure_emergency_mbar: float = 1.0e-4
@@ -179,6 +186,10 @@ class MonitorState:
     coscon_energy_v: Optional[float] = None
     coscon_emission_a: Optional[float] = None
     coscon_filament_a: Optional[float] = None
+    coscon_energy_current_a: Optional[float] = None
+    coscon_anode_voltage_v: Optional[float] = None
+    coscon_repeller_voltage_v: Optional[float] = None
+    coscon_emission_bad_samples: int = 0
     phase_remaining_s: Optional[int] = None
     phase_total_s: Optional[int] = None
     phase_timer_label: str = ""
@@ -200,6 +211,10 @@ class MonitorState:
             "coscon_energy_v": self.coscon_energy_v,
             "coscon_emission_a": self.coscon_emission_a,
             "coscon_filament_a": self.coscon_filament_a,
+            "coscon_energy_current_a": self.coscon_energy_current_a,
+            "coscon_anode_voltage_v": self.coscon_anode_voltage_v,
+            "coscon_repeller_voltage_v": self.coscon_repeller_voltage_v,
+            "coscon_emission_bad_samples": self.coscon_emission_bad_samples,
             "phase_remaining_s": self.phase_remaining_s,
             "phase_total_s": self.phase_total_s,
             "phase_timer_label": self.phase_timer_label,
@@ -326,6 +341,10 @@ class DataLogger:
                 "coscon_energy_v",
                 "coscon_emission_a",
                 "coscon_filament_a",
+                "coscon_energy_current_a",
+                "coscon_anode_voltage_v",
+                "coscon_repeller_voltage_v",
+                "coscon_emission_bad_samples",
                 "phase_remaining_s",
                 "phase_total_s",
                 "phase_timer_label",
@@ -351,6 +370,10 @@ class DataLogger:
                 snap["coscon_energy_v"],
                 snap["coscon_emission_a"],
                 snap["coscon_filament_a"],
+                snap["coscon_energy_current_a"],
+                snap["coscon_anode_voltage_v"],
+                snap["coscon_repeller_voltage_v"],
+                snap["coscon_emission_bad_samples"],
                 snap["phase_remaining_s"],
                 snap["phase_total_s"],
                 snap["phase_timer_label"],
@@ -576,6 +599,14 @@ class CosconMonitor:
     raw: str
 
 
+@dataclass
+class CosconDiagnostics:
+    energy_current_a: Optional[float]
+    anode_voltage_v: Optional[float]
+    repeller_voltage_v: Optional[float]
+    raw: str
+
+
 class CosconUDP:
     """Strict COSCON IS UDP client used by automated Phase 02.
 
@@ -604,7 +635,7 @@ class CosconUDP:
     INTERLOCK_RE = re.compile(r"\bInterlock=([^\s]+)", re.I)
     DETAILS_RE = re.compile(r'Details="([^"]*)"', re.I)
     NUMBER_RE = re.compile(
-        r"\b([A-Za-z][A-Za-z0-9]*)="
+        r"\b([A-Za-z][A-Za-z0-9_]*)="
         r"([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)"
     )
 
@@ -621,21 +652,22 @@ class CosconUDP:
             or bool(self.OPERATE_RE.fullmatch(command))
         )
 
-    def send(self, command: str) -> str:
+    def send(self, command: str, timeout_s: Optional[float] = None) -> str:
         if not self._allowed(command):
             raise RuntimeError(f"Blocked COSCON command: {command!r}")
 
+        effective_timeout_s = self.timeout_s if timeout_s is None else max(0.05, float(timeout_s))
         with self.lock:
             payload = (command + "\r").encode("ascii")
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.settimeout(self.timeout_s)
+                sock.settimeout(effective_timeout_s)
                 sock.sendto(payload, (self.ip, self.port))
                 try:
                     data, sender = sock.recvfrom(8192)
                 except socket.timeout as exc:
                     raise RuntimeError(
                         f"No COSCON reply to {command!r} within "
-                        f"{self.timeout_s:.1f} s."
+                        f"{effective_timeout_s:.2f} s."
                     ) from exc
 
             if sender[0] != self.ip:
@@ -683,6 +715,38 @@ class CosconUDP:
             energy_v=fields["VEnergy"],
             filament_a=fields["IFilament"],
             emission_a=fields["IEmission"],
+            raw=raw,
+        )
+
+    @staticmethod
+    def _first_numeric_field(fields: dict[str, float], *aliases: str) -> Optional[float]:
+        # Firmware revisions have used slightly different labels. Match exact
+        # aliases first, then compare normalized names without punctuation/case.
+        for alias in aliases:
+            if alias in fields:
+                return fields[alias]
+        normalized = {re.sub(r"[^a-z0-9]", "", key.lower()): value for key, value in fields.items()}
+        for alias in aliases:
+            key = re.sub(r"[^a-z0-9]", "", alias.lower())
+            if key in normalized:
+                return normalized[key]
+        return None
+
+    def diagnostics(self) -> CosconDiagnostics:
+        # Diagnostics are non-critical display values. Use a short timeout so
+        # an unavailable command cannot delay the primary safety polling.
+        raw = self.send("GetDiagnosticValues", timeout_s=min(0.5, self.timeout_s))
+        fields = {key: float(value) for key, value in self.NUMBER_RE.findall(raw)}
+        return CosconDiagnostics(
+            energy_current_a=self._first_numeric_field(
+                fields, "IEnergy", "EnergyCurrent", "IEnergyCurrent", "IBeam"
+            ),
+            anode_voltage_v=self._first_numeric_field(
+                fields, "VAnode", "AnodeVoltage", "VAnodeVoltage"
+            ),
+            repeller_voltage_v=self._first_numeric_field(
+                fields, "VRepeller", "RepellerVoltage", "VRepellerVoltage"
+            ),
             raw=raw,
         )
 
@@ -1027,6 +1091,9 @@ HTML_TEMPLATE = r"""
                 <div class="metric"><div class="metricLabel">Safety permission</div><div id="interlockVal" class="metricValue">--</div><div class="metricSub">Internal hardware interlock</div></div>
                 <div class="metric"><div class="metricLabel">Last telemetry</div><div id="updatedAt" class="metricValue">--</div></div>
                 <div class="metric"><div class="metricLabel">Filament current</div><div id="filamentVal" class="metricValue">-- A</div></div>
+                <div class="metric"><div class="metricLabel">Energy current</div><div id="energyCurrentVal" class="metricValue">-- A</div></div>
+                <div class="metric"><div class="metricLabel">Anode voltage</div><div id="anodeVoltageVal" class="metricValue">-- V</div></div>
+                <div class="metric"><div class="metricLabel">Repeller voltage</div><div id="repellerVoltageVal" class="metricValue">-- V</div></div>
                 <div class="metric"><div class="metricLabel">Keysight voltage</div><div id="keysightV" class="metricValue">-- V</div></div>
                 <div class="metric"><div class="metricLabel">Keysight current</div><div id="keysightI" class="metricValue">-- A</div></div>
                 <div id="errorBox" class="errorBox">No active errors.</div>
@@ -1039,7 +1106,8 @@ HTML_TEMPLATE = r"""
             <div class="detailsBody">
               <div class="reminder">
                 Keep the COSCON webpage and SpecsLab/Prodigy closed while Phase 02 is active.<br><br>
-                Degas, target validation, Operate, output qualification, sputtering timing and return to Standby are automated. The leak valve remains manual.<br><br>
+                Degas is automated unless <b>Start without initial Degas</b> was selected in the launcher. Target validation, Operate, output qualification, sputtering timing and return to Standby are automated. The leak valve remains manual.<br><br>
+                Only skip Degas when continuing the same chamber preparation after an earlier partial Phase 02 run and the operator has verified that another Degas is not required.<br><br>
                 Supervise the first complete three-cycle runs and keep local COSCON controls accessible.
               </div>
             </div>
@@ -1163,19 +1231,21 @@ HTML_TEMPLATE = r"""
     const container = el('workflow');
     container.innerHTML = '';
 
+    const initialDegasSkipped = Boolean(snap.start_without_degassing);
+
     WORKFLOW_STEPS.forEach((step, idx) => {
       const row = document.createElement('div');
       row.className = 'step';
       if (idx < currentIndex) row.classList.add('done');
       if (idx === currentIndex) row.classList.add('active');
-      if (idx === 0 && cycle > 1) {
+      if (idx === 0 && (cycle > 1 || initialDegasSkipped)) {
         row.classList.remove('done', 'active');
         row.classList.add('skipped');
       }
 
       const number = document.createElement('div');
       number.className = 'stepNumber';
-      number.textContent = (idx === 0 && cycle > 1) ? '—' : String(idx + 1);
+      number.textContent = (idx === 0 && (cycle > 1 || initialDegasSkipped)) ? '—' : String(idx + 1);
 
       const text = document.createElement('div');
       const name = document.createElement('div');
@@ -1183,7 +1253,13 @@ HTML_TEMPLATE = r"""
       name.textContent = step.name;
       const desc = document.createElement('div');
       desc.className = 'stepDesc';
-      desc.textContent = (idx === 0 && cycle > 1) ? 'Skipped after cycle 1' : step.desc;
+      if (idx === 0 && initialDegasSkipped) {
+        desc.textContent = 'Skipped by launcher setting for this continuation run';
+      } else if (idx === 0 && cycle > 1) {
+        desc.textContent = 'Skipped after cycle 1';
+      } else {
+        desc.textContent = step.desc;
+      }
       text.append(name, desc);
 
       const timing = document.createElement('div');
@@ -1252,8 +1328,17 @@ HTML_TEMPLATE = r"""
     el('energyVal').textContent = `${fmtNumber(snap.coscon_energy_v, 2)} V`;
     el('energySub').textContent = `Target: ${fmtNumber(snap.coscon_target_energy_v, 0)} V`;
     el('emissionVal').textContent = `${fmtNumber(Number(snap.coscon_emission_a) * 1000, 3)} mA`;
-    el('emissionSub').textContent = `Target: ${fmtNumber(Number(snap.coscon_target_emission_a) * 1000, 3)} mA`;
+    const badEmissionReads = Number(snap.coscon_emission_bad_samples || 0);
+    const emissionToleranceMa = Number(snap.coscon_emission_tolerance_a || 0) * 1000;
+    const requiredBadReads = Number(snap.coscon_emission_fault_samples || 3);
+    el('emissionVal').className = `metricValue ${badEmissionReads > 0 ? 'bad' : ''}`;
+    el('emissionSub').textContent = badEmissionReads > 0
+      ? `Outside ±${fmtNumber(emissionToleranceMa, 3)} mA: recheck ${badEmissionReads}/${requiredBadReads}`
+      : `Target: ${fmtNumber(Number(snap.coscon_target_emission_a) * 1000, 3)} mA`;
     el('filamentVal').textContent = `${fmtNumber(snap.coscon_filament_a, 3)} A`;
+    el('energyCurrentVal').textContent = `${fmtNumber(snap.coscon_energy_current_a, 4)} A`;
+    el('anodeVoltageVal').textContent = `${fmtNumber(snap.coscon_anode_voltage_v, 2)} V`;
+    el('repellerVoltageVal').textContent = `${fmtNumber(snap.coscon_repeller_voltage_v, 2)} V`;
 
     const pressure = Number(snap.pressure_mbar);
     el('pressureVal').textContent = Number.isNaN(pressure) ? '--' : pressure.toExponential(3);
@@ -1467,6 +1552,13 @@ class SputterAnnealController:
         self.aborted = False
         self.run_started_at = time.time()
         self.stage_started_at = self.run_started_at
+        # Phase 02 intentionally raises chamber pressure to ~2e-5 mbar with Ar.
+        # Therefore its desktop popup follows the existing 1e-4 mbar emergency
+        # threshold, not the 5e-6 UHV warning used in Phases 01 and 03.
+        self.pressure_emergency_alarm = PressureEmergencyAlarm(
+            threshold_mbar=self.cfg.pressure_emergency_mbar,
+            context='Phase 02 - Sputtering-Annealing',
+        )
 
         base_dir = make_short_output_dir(self.cfg.run_name)
         self.logger = DataLogger(base_dir)
@@ -1664,6 +1756,9 @@ class SputterAnnealController:
                     "pressure_warning_mbar": self.cfg.pressure_warning_mbar,
                     "coscon_target_energy_v": self.cfg.coscon_energy_v,
                     "coscon_target_emission_a": self.cfg.coscon_emission_a,
+                    "coscon_emission_tolerance_a": self.cfg.coscon_emission_tolerance_a,
+                    "coscon_emission_fault_samples": self.cfg.coscon_emission_fault_samples,
+                    "start_without_degassing": self.cfg.start_without_degassing,
                     "degas_timeout_s": int(self.cfg.degas_timeout_minutes * 60),
                     "pressure_conditioning_total_s": int(self.cfg.standby_conditioning_s),
                     "operate_timeout_s": int(self.cfg.operate_transition_timeout_s),
@@ -1731,6 +1826,8 @@ class SputterAnnealController:
         return reply in ("y", "yes")
 
     def _monitor_loop(self) -> None:
+        diagnostic_failures = 0
+        diagnostics_enabled = True
         while not self.stop_event.is_set():
             errors: list[str] = []
 
@@ -1769,10 +1866,28 @@ class SputterAnnealController:
                 self.state.coscon_energy_v = monitor.energy_v
                 self.state.coscon_emission_a = monitor.emission_a
                 self.state.coscon_filament_a = monitor.filament_a
+
+                # Diagnostic values are display/logging only. Failure to obtain
+                # them must never abort or mask the primary COSCON safety data.
+                if diagnostics_enabled:
+                    try:
+                        diagnostics = self.coscon.diagnostics()
+                        self.state.coscon_energy_current_a = diagnostics.energy_current_a
+                        self.state.coscon_anode_voltage_v = diagnostics.anode_voltage_v
+                        self.state.coscon_repeller_voltage_v = diagnostics.repeller_voltage_v
+                        diagnostic_failures = 0
+                    except Exception as diagnostic_exc:
+                        diagnostic_failures += 1
+                        if diagnostic_failures == 1:
+                            warn(f"COSCON diagnostic values unavailable; primary monitoring continues: {diagnostic_exc}")
+                        if diagnostic_failures >= 3:
+                            diagnostics_enabled = False
+                            warn("COSCON diagnostic polling disabled after 3 failures; Energy/Anode/Repeller values will show --.")
             except Exception as exc:
                 errors.append(f"COSCON monitor failed: {exc}")
 
             self.state.pressure_mbar = pressure
+            self.pressure_emergency_alarm.update(pressure)
             self.state.oven_pv_c = oven_pv
             self.state.oven_sv_c = oven_sv
             self.state.keysight_voltage_v = voltage
@@ -1806,6 +1921,12 @@ class SputterAnnealController:
             raise RuntimeError("Run cancelled: sputter gun cable not confirmed.")
         if not self._ask_yes_no("Have you started the sputtering electronics?"):
             raise RuntimeError("Run cancelled: sputtering electronics not confirmed.")
+        if self.cfg.start_without_degassing:
+            if not self._ask_yes_no(
+                "Start without initial Degas is selected. Confirm this is a continuation of the same "
+                "chamber preparation and that the operator has verified a new Degas is not required."
+            ):
+                raise RuntimeError("Run cancelled: skipping Degas was not explicitly confirmed.")
         self._wait_for_token("r", "If everything is ready, click Start run.")
 
     def start_ui(self) -> None:
@@ -2019,21 +2140,86 @@ class SputterAnnealController:
     def run_sputter_timer(self, cycle: int) -> None:
         self._set_stage("SPUTTERING", cycle)
         banner(f"CYCLE {cycle} - AUTOMATED SPUTTERING")
-        total_s=int(self.cfg.sputter_minutes*60); start=time.time(); self._set_phase_timer(total_s,total_s,"Sputtering left")
+        total_s = int(self.cfg.sputter_minutes * 60)
+        start = time.time()
+        self._set_phase_timer(total_s, total_s, "Sputtering left")
+        emission_bad_samples = 0
+
+        target_emission_ma = self.cfg.coscon_emission_a * 1000.0
+        tolerance_emission_ma = self.cfg.coscon_emission_tolerance_a * 1000.0
+        minimum_emission_ma = target_emission_ma - tolerance_emission_ma
+        maximum_emission_ma = target_emission_ma + tolerance_emission_ma
+
         while True:
-            self._poll_ui_background(); remaining=total_s-int(time.time()-start); self._set_phase_timer(remaining,total_s,"Sputtering left")
-            if remaining<=0: break
-            pressure=self._require_pressure(normal_window=True); status=self.coscon.status(); mon=self.coscon.monitor()
-            if status.interlock.lower()!="ok": raise RuntimeError(f"COSCON interlock changed: {status.raw}")
-            if status.mode.lower()=="error": raise RuntimeError(f"COSCON device error: {status.details}")
-            if status.mode.lower()!="operating": raise RuntimeError(f"COSCON left Operating: {status.raw}")
-            if mon.energy_v < 0.8*self.cfg.coscon_energy_v:
+            self._poll_ui_background()
+            remaining = total_s - int(time.time() - start)
+            self._set_phase_timer(remaining, total_s, "Sputtering left")
+            if remaining <= 0:
+                break
+
+            self._require_pressure(normal_window=True)
+            status = self.coscon.status()
+            mon = self.coscon.monitor()
+            self.state.coscon_mode = status.mode
+            self.state.coscon_interlock = status.interlock
+            self.state.coscon_details = status.details
+            self.state.coscon_energy_v = mon.energy_v
+            self.state.coscon_emission_a = mon.emission_a
+            self.state.coscon_filament_a = mon.filament_a
+            self.state.last_update = datetime.now()
+
+            # Interlock, device mode, energy collapse and energy tolerance remain
+            # immediate abort conditions. Only isolated emission spikes are retried.
+            if status.interlock.lower() != "ok":
+                raise RuntimeError(f"COSCON interlock changed: {status.raw}")
+            if status.mode.lower() == "error":
+                raise RuntimeError(f"COSCON device error: {status.details}")
+            if status.mode.lower() != "operating":
+                raise RuntimeError(f"COSCON left Operating: {status.raw}")
+            if mon.energy_v < 0.8 * self.cfg.coscon_energy_v:
                 raise RuntimeError(f"COSCON energy collapsed to {mon.energy_v:.1f} V")
-            if abs(mon.energy_v-self.cfg.coscon_energy_v)>self.cfg.coscon_energy_tolerance_v:
+            if abs(mon.energy_v - self.cfg.coscon_energy_v) > self.cfg.coscon_energy_tolerance_v:
                 raise RuntimeError(f"COSCON energy out of tolerance: {mon.energy_v:.1f} V")
-            if abs(mon.emission_a-self.cfg.coscon_emission_a)>self.cfg.coscon_emission_tolerance_a:
-                raise RuntimeError(f"COSCON emission out of tolerance: {mon.emission_a*1000:.3f} mA")
+
+            emission_out_of_tolerance = (
+                abs(mon.emission_a - self.cfg.coscon_emission_a)
+                > self.cfg.coscon_emission_tolerance_a
+            )
+            if emission_out_of_tolerance:
+                emission_bad_samples += 1
+                self.state.coscon_emission_a = mon.emission_a
+                self.state.coscon_emission_bad_samples = emission_bad_samples
+                warning_note = (
+                    "COSCON emission outside tolerance: "
+                    f"{mon.emission_a * 1000.0:.3f} mA; expected "
+                    f"{minimum_emission_ma:.3f}-{maximum_emission_ma:.3f} mA. "
+                    f"Consecutive bad reading {emission_bad_samples}/"
+                    f"{self.cfg.coscon_emission_fault_samples}; repeating measurement."
+                )
+                self.logger.log_snapshot(self.state.snapshot(), note=warning_note)
+                self._update_ui_status()
+                warn(warning_note)
+                if emission_bad_samples >= self.cfg.coscon_emission_fault_samples:
+                    raise RuntimeError(
+                        "COSCON emission remained out of tolerance for "
+                        f"{emission_bad_samples} consecutive readings. Last value: "
+                        f"{mon.emission_a * 1000.0:.3f} mA"
+                    )
+                time.sleep(self.cfg.coscon_emission_recheck_s)
+                continue
+
+            if emission_bad_samples:
+                recovery_note = (
+                    "COSCON emission returned inside tolerance: "
+                    f"{mon.emission_a * 1000.0:.3f} mA; consecutive warning counter reset."
+                )
+                self.logger.log_snapshot(self.state.snapshot(), note=recovery_note)
+                info(recovery_note)
+            emission_bad_samples = 0
+            self.state.coscon_emission_bad_samples = 0
             time.sleep(1.0)
+
+        self.state.coscon_emission_bad_samples = 0
         self._set_stage("COSCON_STANDBY", cycle)
         self.coscon.send("SwitchToStandby")
         standby_total_s = 25
@@ -2138,8 +2324,14 @@ class SputterAnnealController:
             self._monitor_thread.start()
             self.preflight()
             for cycle in range(1, self.cfg.cycles + 1):
-                if cycle == 1:
+                if cycle == 1 and not self.cfg.start_without_degassing:
                     self.coscon_degassing_step(cycle)
+                elif cycle == 1:
+                    banner("CYCLE 1 - INITIAL DEGAS SKIPPED")
+                    warn(
+                        "Initial COSCON Degas was skipped by the launcher setting. "
+                        "This run is treated as a continuation of a previously degassed chamber preparation."
+                    )
                 else:
                     info(
                         f"Cycle {cycle}: skipping degassing confirmation; degassing is only done once before cycle 1."
@@ -2252,6 +2444,7 @@ class SputterAnnealController:
             if not reset_ok:
                 warn(f"Abort path PID reset did not complete. Last error: {last_reset_error}. Check the PID manually.")
 
+        self.pressure_emergency_alarm.close()
         self.stop_event.set()
         if self._monitor_thread is not None and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=5)
@@ -2290,9 +2483,13 @@ def main() -> None:
     print(f"  COSCON UDP: {cfg.coscon_ip}:{cfg.coscon_udp_port}")
     print("  COSCON web interface: not used; keep it closed")
     print(f"  Cycles: {cfg.cycles}")
+    print(f"  Start without initial Degas: {'YES' if cfg.start_without_degassing else 'no'}")
     print(f"  Sputter time: {cfg.sputter_minutes} min")
     print(f"  COSCON energy target: {cfg.coscon_energy_v:.1f} V")
     print(f"  COSCON emission target: {cfg.coscon_emission_a * 1000:.3f} mA")
+    print(f"  COSCON emission tolerance: ±{cfg.coscon_emission_tolerance_a * 1000:.3f} mA")
+    print(f"  Consecutive bad emission reads before abort: {cfg.coscon_emission_fault_samples}")
+    print(f"  Emission recheck delay: {cfg.coscon_emission_recheck_s:.2f} s")
     print(f"  Anneal target: {cfg.anneal_target_c:.0f} °C")
     print(f"  Anneal hold: {cfg.anneal_hold_minutes} min")
     print(f"  Anneal reset after cycle: {cfg.anneal_reset_c:.0f} °C")

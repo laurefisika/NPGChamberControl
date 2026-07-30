@@ -92,6 +92,21 @@ def test_phase2_coscon_targets_are_editable_with_operator_units() -> None:
     }
 
 
+def test_phase2_can_start_without_initial_degas_as_a_run_only_setting() -> None:
+    specs = {spec.key: spec for spec in specs_for_phase("sputter")}
+    skip_degas = specs["start_without_degassing"]
+
+    assert skip_degas.kind == "bool"
+    assert skip_degas.default is False
+
+    values = all_default_values()["sputter"]
+    values["start_without_degassing"] = True
+    raw = encode_overrides("sputter", values)
+    loaded = load_phase_overrides("sputter", {AUTOMATION_PARAMETERS_ENV: raw})
+
+    assert loaded == {"start_without_degassing": True}
+
+
 def test_phase2_coscon_target_editor_limits() -> None:
     values = all_default_values()["sputter"]
     values["coscon_energy_v"] = 3100.0
@@ -151,3 +166,32 @@ def test_pyrometer_custom_calibration_rejects_nonphysical_slope_and_cutoff() -> 
     values["minimum_valid_pyrometer_c"] = 40.0
     with pytest.raises(ValueError, match="Minimum calibrated pyrometer temperature"):
         validate_pyrometer_values(values)
+
+
+def test_rate_feedback_relationships_are_validated() -> None:
+    values = all_default_values()["heat"]
+    values["EVAPORATION_CONTROL_MODE"] = "compound"
+    assert validate_phase_values("heat", values)["EVAPORATION_CONTROL_MODE"] == "compound"
+
+    values = all_default_values()["heat"]
+    values["RATE_CONTROL_MAX_TEMP_C"] = values["HEATING_TRIGGER_TEMP_C"] - 1.0
+    with pytest.raises(ValueError, match="temperature ceiling"):
+        validate_phase_values("heat", values)
+
+    values = all_default_values()["dpdbba"]
+    values["RATE_PID_ACTIVATION_A_PER_S"] = values["CK1_RATE_TARGET_A_PER_S"]
+    with pytest.raises(ValueError, match="activation threshold"):
+        validate_phase_values("dpdbba", values)
+
+
+def test_rate_control_safety_parameters_are_available_in_both_phases() -> None:
+    expected = {
+        "EVAPORATION_CONTROL_MODE",
+        "RATE_CONTROL_MAX_TEMP_C",
+        "RATE_PID_SIGNAL_TIMEOUT_S",
+        "RATE_PID_MAX_UP_STEP_A",
+        "RATE_PID_MAX_DOWN_STEP_A",
+        "COMPOUND_TEMP_GUARD_BAND_C",
+    }
+    for phase in ("heat", "dpdbba"):
+        assert expected <= {spec.key for spec in specs_for_phase(phase)}

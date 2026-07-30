@@ -51,8 +51,13 @@ Releases `0.9.8`–`0.9.10` added phase explanation PDFs, refined launcher spaci
 - `0.9.16` integrated the IMPAC IPE 140 pyrometer and shared material/calibration profiles.
 - `0.9.17` added persistent full-chamber automation modes, completed the Phase 01/03 visual refinement, separated Phase 03 Finish from Abort, and retained phase-specific workflow behavior.
 - `0.9.18` made the long parameter editor easier to use, removed the redundant Au/mica restore control, finalized the Phase 01/03 panel spacing, and made Phase 03 Abort command and verify an oven PID target of 0 °C before the independent Keysight ramp-down/OFF path.
+- `0.9.19` added the run-only **Start without initial Degas** continuation option for Phase 02 and improved Phase 01/03 plotting responsiveness without reducing complete saved data.
+- `0.9.20` changed the Phase 02 abort PID target to 0 °C and simplified Phase 04 so normal completion and abort both finish at the configured 0 °C cooldown target instead of sending an obsolete final 30 °C command.
+- `0.9.21` added selectable temperature, rate and compound CK-1 feedback to Phases 01 and 03, conservative rate-loop safety limits and supervised validation guidance. It also corrected the shared launcher environment so phase subprocesses can import the current project package from their data-folder working directories.
 
-The final codebase compiled successfully and recorded 93 passing no-hardware tests on 21 July. Hardware evidence remained deliberately separate: network and protocol tests passed, supervised COSCON Degas completed and returned to Standby after about seven minutes, while the supervised Operate attempt remained inconclusive and was not reported as a pass.
+The numbered source packages supplied for this update map to the internal releases as follows: project archive v12 is `0.9.17`, v13 is `0.9.19`, v14 is `0.9.20`, and v15 is `0.9.21`. The corrected v15 source is the supported repository root; its shared `legacy_runner.py` contains the import-path correction required when a phase is launched from `Data Samples`.
+
+The `0.9.21` codebase compiled successfully and recorded 125 passing no-hardware tests on 30 July. Hardware evidence remains deliberately separate: network and protocol tests passed, supervised COSCON Degas completed and returned to Standby after about seven minutes, while the supervised Operate attempt remained inconclusive and was not reported as a pass. The new rate/compound feedback is software-tested but is not represented as physically tuned.
 
 ## Snapshot policy
 
@@ -61,6 +66,6 @@ The private archive now contains:
 1. the March prototype snapshot;
 2. sixteen source-backed July packages spanning `0.9.11`, `0.9.12`, the temporary `0.10.0` prototype, `0.9.13`–`0.9.16`, and six distinct `0.9.17` states;
 3. the standalone July pyrometer and COSCON diagnostic programs;
-4. the integrated `0.9.18` package.
+4. the integrated `0.9.21` package.
 
 The recovered July packages are indexed under `history/2026-07-recovered-packages/`. April–June filenames confirmed by the conversations but not recovered as bytes are tracked in `history/MISSING_SOURCE_FILES.md`. No missing file is recreated from a written description.

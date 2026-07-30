@@ -46,9 +46,10 @@ if errorlevel 1 (
     "%PYTHON%" -m pip install -e .
     if errorlevel 1 goto install_error
 ) else (
-    echo Package already installed. Refreshing editable link ...
-    "%PYTHON%" -m pip install -e . --no-deps --quiet
-    if errorlevel 1 goto install_error
+    echo Runtime already installed. Using the current project source tree ...
+    rem The command is launched from this folder, so Python loads the current
+    rem npg_chamber source before any older editable-link metadata in .venv.
+    rem Avoiding a redundant pip rebuild also prevents cache/disk-space failures.
 )
 
 echo.

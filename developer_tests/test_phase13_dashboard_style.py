@@ -49,9 +49,9 @@ def test_phase_01_and_03_reserve_vertical_space_for_titles_and_selector():
         assert "panel_width = 0.282" in source
         assert "panel_height = 0.976" in source
         assert "graph_header_height = selector_height + selector_gap" in source
-        assert "selector_lift = 0.052" in source
+        assert "TEMPERATURE_SELECTOR_LIFT = 0.040" in source
         assert "y = bbox.y1 + selector_lift" in source
-        assert "pad=28" in source
+        assert "TEMPERATURE_TITLE_PAD = 4" in source
 
 
 def test_phase_01_and_03_keep_distinct_workflows_and_completion_controls():
@@ -82,6 +82,16 @@ def test_phase_01_and_03_keep_distinct_workflows_and_completion_controls():
     assert "set_oven_pid_setpoint(0.0)" not in finish_source
 
 
+def test_phase_01_and_03_temperature_views_use_matching_red_blue_yellow_accents():
+    for source in (_source(PHASE_01), _source(PHASE_03)):
+        assert "'oven': {" in source and "'accent': '#c62828'" in source
+        assert "'pyrometer': {" in source and "'accent': '#1565c0'" in source
+        assert "'sample': {" in source and "'accent': '#d4a000'" in source
+        assert "line_temperature_oven.set_color(accent)" in source
+        assert "color=temperature_accent" in source
+        assert "pad=TEMPERATURE_TITLE_PAD" in source
+
+
 def test_phase_01_and_03_use_shared_presentation_only_style_helper():
     helper = _source(STYLE_HELPER)
     assert "presentation-only helpers" in helper
@@ -97,3 +107,19 @@ def test_redundant_pyrometer_emissivity_launcher_is_removed():
     assert not (ROOT / "CHECK_PYROMETER_EMISSIVITY.bat").exists()
     assert not (ROOT / "diagnostic_tools" / "check_pyrometer_emissivity.py").exists()
     assert "CHECK_PYROMETER_EMISSIVITY.bat" not in _source(ROOT / "MANIFEST.in")
+
+
+def test_phase13_gui_refresh_uses_bounded_plot_snapshots_and_background_saves() -> None:
+    for path in (PHASE_01, PHASE_03):
+        text = path.read_text(encoding="utf-8")
+        assert "GUI_REFRESH_INTERVAL_S = 0.50" in text
+        assert "MAX_PLOT_POINTS_PER_SERIES = 400" in text
+        assert "AUTOSCALE_EVERY_N_REFRESHES = 10" in text
+        assert "def copy_plot_snapshot(" in text
+        assert "def periodic_data_saver():" in text
+        assert "threading.Thread(target=periodic_data_saver, daemon=True)" in text
+        assert "threading.Thread(target=snapshot_saver_worker, daemon=True)" in text
+        assert "snapshot_worker_wakeup.set()" in text
+        assert "snapshot_worker_stop_event.set()" in text
+        assert "snapshot = copy_plot_snapshot()" in text
+        assert "last_data_save_at" not in text

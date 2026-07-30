@@ -1,6 +1,59 @@
 # Changelog
 
-## 0.9.18 - Current integrated build
+## 0.9.21 - Project archive v15: CK-1 rate and compound feedback control
+
+- Added a run-selectable **Evaporation feedback mode** to Phases 01 and 03 with `temperature`, `rate` and `compound` choices. The established temperature PID remains the packaged default so existing validated runs do not change silently.
+- Added a reusable, hardware-independent CK-1 rate PID implementation with a spike-resistant trimmed rate average, proportional/integral/optional derivative terms, asymmetric current-step limits, current-bound anti-windup and compound temperature-ceiling supervision.
+- In rate/compound modes, the normal Steps/Slope warm-up remains active until CK-1 temperature and filtered QMB rate are sufficient for a bumpless handover. Rate PID then remains active through shutter waiting and the complete calibration/evaporation interval.
+- Added stable-rate qualification before shutter opening: rate/compound modes require consecutive new QMB readings inside the existing displayed rate band, preventing a single transient from starting deposition.
+- Added a dedicated rate-feedback safety timeout. Once rate control is active, a missing or stale CK-1 rate signal causes a graph/summary capture, `SAFETY_STOP`, Keysight current `0 A` and output `OFF` rather than open-loop heating.
+- Added an editable rate-control temperature ceiling, rate-PID activation threshold, filter, gains, dead band, update period, asymmetric step limits, integral limit, stable-read count and compound guard band to **Change automatization parameters** and saved full-chamber modes.
+- Preserved the independent CK-1 temperature watchdog. In rate/compound modes its soft/hard margins are referenced to the rate-control temperature ceiling; compound mode additionally tapers positive rate-PID corrections before that ceiling is reached.
+- Changed the Phase 03 shutter-open QMB reset so only thickness histories restart at zero. CK-1/Sample rate histories remain continuous, avoiding loss of the feedback signal during the control handover.
+- Added rate-control state to the Phase 01/03 dashboards, run parameter records and phase summaries, plus regression tests for filtering, directionality, limits, anti-windup, ceiling supervision, mode selection and deposition-phase persistence.
+- Updated the internal package version to `0.9.21`, refreshed the matching Phase 01/03 recovery backups and regenerated the source manifest.
+- Added `RATE_PID_VALIDATION.md` with supervised first-run, safety-path and gain-tuning checks; the loop is software-tested but is not represented as physically tuned.
+- Updated the Windows launcher so an existing local runtime starts the current source tree directly instead of rebuilding the editable package on every launch, avoiding redundant pip cache/disk-space failures while preserving first-time installation behavior.
+- Fixed phase subprocess import resolution when the launcher starts a script from its phase-specific `Data Samples` folder. The launcher now prepends the current project root to the child process `PYTHONPATH`, so every phase imports the `npg_chamber` package from the folder that was actually launched even if the project directory is renamed or moved. This resolves the Phase 03 `ModuleNotFoundError: No module named 'npg_chamber'` without changing any phase control or hardware logic.
+- Scoped repository-level Pytest discovery to `developer_tests/`. Historical hardware diagnostics remain preserved under `history/` but are no longer mistaken for current regression tests when `pytest` is run from the repository root.
+
+## 0.9.20 - Project archive v14: PID safe-zero finalization
+
+- Changed the Phase 02 **Abort / Safe Stop** oven PID reset default from `20.0 °C` to `0.0 °C` in both the runtime controller and **Change automatization parameters**. The verified COSCON safe-state and remaining Phase 02 shutdown protections are unchanged.
+- Simplified normal Phase 04 completion. After the second annealing hold, the script now writes the configured cooldown target (`0.0 °C` by default), holds that PID setpoint for `10 minutes`, and finishes while leaving the oven PID SV at the same `0.0 °C` value.
+- Removed the obsolete Phase 04 command and GUI state that changed the PID from `0 °C` to `30 °C` immediately before completion. The unused **Final PID target** field was removed from the launcher parameter editor.
+- Updated Phase 04 **Abort / Safe Stop** to use the same cooldown target (`0.0 °C` by default) before switching the Keysight output off, so normal and abort paths no longer contain a hidden 30 °C command.
+- Moved the Phase 04 **Phase sequence** heading and text slightly lower and shortened the sequence description so it remains legible without colliding with the current-status block or **Last action**.
+- Added migration compatibility for saved automation modes created before 0.9.20: an old `FINAL_VENT_TARGET_C` entry is discarded automatically instead of preventing the mode from loading.
+- Updated the internal package version to `0.9.20`, the v14 documentation, Phase 02/04 explanation PDFs, regression tests, current recovery backups and source manifest.
+
+## 0.9.19 - Phase 02 continuation runs
+
+- Added **Start without initial Degas** to **Change automatization parameters → Phase 02 → Workflow**. It is disabled by default and applies only to the current launcher session.
+- When enabled, Phase 02 skips the automatic COSCON Degas before the first configured cycle. This supports continuation runs after an earlier partial Phase 02 execution, for example running one remaining sputter-anneal cycle without repeating Degas.
+- Added a conditional preflight confirmation explaining that the option is only for the same chamber preparation after the operator has verified that another Degas is not required. Cancelling that confirmation stops the run before COSCON activation.
+- Deliberately excluded this continuation-only checkbox from reusable saved automation modes, so a tutor-approved recipe cannot silently skip Degas in a later chamber preparation.
+- Updated the Phase 02 workflow display and safety reminders so Degas is visibly marked as skipped by the launcher setting. The selection is printed in the terminal and saved in the effective run-parameter JSON for traceability.
+- Kept Degas enabled for normal runs, kept all pressure/interlock/energy/emission checks unchanged, and retained the existing immediate safe-stop paths.
+- Changed the internal package version to `0.9.19` and refreshed the matching Phase 02 recovery backup, source manifest, documentation and regression tests.
+
+### Phase 01/03 temperature-view correction and event-loop responsiveness (same 0.9.19 version)
+
+- Restored the Phase 01 and Phase 03 temperature-view selector/title area slightly lower, keeping the dynamic graph title directly associated with its plot without covering neighbouring graphs.
+- Made each selected temperature graph use exactly the same accent as its title and selector: Oven PID red, Pyrometer blue and Sample estimate yellow/gold. Saved comparison plots use the same mapping.
+- Moved graph-only PNG snapshot rendering out of the Matplotlib mouse/event loop into a dedicated background saver thread. Snapshot requests no longer freeze button clicks while a 3x3 figure is generated and written.
+- Reduced the live display workload to 400 plotted points per series and a 0.50 s full-plot refresh, while preserving complete raw data logging, final saves, experimental logic and all safety behavior.
+- Refreshed the matching Phase 01/03 recovery scripts, source manifest and regression tests without changing the internal package version from `0.9.19`.
+
+## 0.9.18 - COSCON confirmation, diagnostics and responsiveness
+
+### COSCON emission confirmation, extra diagnostics and GUI responsiveness
+
+- Changed the Phase 02 emission safety check so the first out-of-tolerance measurement raises an immediate warning and is written to the CSV with its exact timestamp. The measurement is repeated after an editable delay, the counter resets after any valid reading, and safe abort occurs only after the configured number of consecutive anomalous measurements.
+- Added Phase 02 launcher fields for COSCON energy tolerance, emission tolerance, consecutive bad emission readings before abort, emission recheck delay and stable-output readings. These remain run-only settings and are recorded with the effective automation parameters.
+- Added display/logging-only COSCON diagnostic readbacks for **Energy current**, **Anode voltage** and **Repeller voltage** beside the existing filament value. Diagnostic-command failure does not disable pressure, mode, interlock, energy or emission supervision and cannot itself abort the phase.
+- Improved Phase 01 and Phase 03 responsiveness by replacing repeated full-history GUI copies with bounded full-run plot sampling, reducing unnecessary autoscaling/redraw pressure, and moving complete text-file rewrites to a background saver thread. Complete data files and final saves are preserved; PID, Keysight, QMB, watchdog, shutter and phase-transition logic are unchanged.
+- Refreshed the matching recovery scripts in `original_scripts_backup/`, updated the source manifest and added regression tests for the new safety, diagnostics and performance paths.
 
 ### Parameter-editor usability and Phase 01/03 workflow separation
 
@@ -13,9 +66,7 @@
 - Updated the Phase 03 **Abort / safe stop** action to command and verify an oven PID target of `0.0 °C` before continuing the independent controlled Keysight ramp-down and output-OFF sequence. Failure to confirm the PID write is reported prominently but does not prevent the electrical safe stop.
 - Reasserted the phase-specific experimental workflows in code and automated checks: Phase 01 contains no 200 °C oven PID write, while Phase 03 alone retains `OVEN_TARGET_TEMPERATURE_C` and the startup setpoint command. The shared Phase 01/03 styling remains presentation-only.
 - Refreshed `original_scripts_backup/` with byte-for-byte copies of the four current authoritative phase scripts, as requested, and updated the source manifest. The folder remains excluded from launcher execution.
-- Raised the internal project version to `0.9.18` because these operator-facing and safe-abort changes form a distinct release. Existing serial-port handoff protections remain active.
-
-## 0.9.17 - Saved modes, pyrometer integration and refined operator views
+- Kept the internal project version at `0.9.17` and retained the existing serial-port handoff protections.
 
 ### Full-chamber automation modes and Phase 01/03 layout refinement
 
@@ -35,7 +86,7 @@
 - Removed the separate `CHECK_PYROMETER_EMISSIVITY.bat` and its one-purpose Python wrapper. Emissivity selection and verified hardware readback remain integrated in the normal launcher/phase startup path, avoiding a redundant user-facing tool.
 - Added one shared Phase 01/03 styling helper and removed generated cache files from the deliverable. `original_scripts_backup/` remains unchanged.
 
-### Functional changes
+### 0.9.17 - Functional changes
 
 - Removed **ICN2** from the Phase 02 window title.
 - Simplified the permanent Phase 02 telemetry area. COSCON mode and the hardware safety interlock remain active in the automation, CSV log and abort logic, but they are now shown only inside **Auxiliary diagnostics**. The main header and process card show one clear **Waiting / Ready / Check** system result instead of separate technical cards.

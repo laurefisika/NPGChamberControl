@@ -20,7 +20,7 @@ from npg_chamber.config.run_parameters import (
     validate_pyrometer_values,
 )
 
-MODE_STORE_VERSION = 1
+MODE_STORE_VERSION = 3
 PACKAGED_DEFAULT_MODE_NAME = "Packaged defaults"
 
 
@@ -34,7 +34,7 @@ def _packaged_default_mode() -> dict[str, Any]:
     return {
         "description": (
             "Factory project recipe. All editable values match the packaged "
-            "0.9.18 defaults."
+            "0.9.21 defaults."
         ),
         "phases": all_default_values(),
         "pyrometer": pyrometer_default_values(),
@@ -62,10 +62,20 @@ def validate_automation_mode(values: Mapping[str, Any]) -> dict[str, Any]:
     if unknown:
         raise ValueError(f"Automation mode has unknown phase(s): {', '.join(unknown)}")
 
-    phases = {
-        phase: validate_phase_values(phase, raw_phases[phase])
-        for phase in PHASE_PARAMETER_SPECS
-    }
+    phases: dict[str, dict[str, Any]] = {}
+    for phase in PHASE_PARAMETER_SPECS:
+        raw_phase_values = raw_phases[phase]
+        if not isinstance(raw_phase_values, Mapping):
+            raise ValueError(f"Automation mode phase {phase!r} must be a mapping")
+        migrated_values = dict(raw_phase_values)
+        if phase == "anneal":
+            # Version 0.9.20 removed the obsolete final 30 °C step. Older saved
+            # modes may still contain this key; discard it so they remain loadable.
+            migrated_values.pop("FINAL_VENT_TARGET_C", None)
+        phases[phase] = validate_phase_values(phase, migrated_values)
+    # Skipping Degas depends on the immediate history of one physical chamber
+    # preparation. It is deliberately never persisted in a reusable recipe.
+    phases["sputter"]["start_without_degassing"] = False
     pyrometer = validate_pyrometer_values(raw_pyrometer)
     return {
         "description": description,

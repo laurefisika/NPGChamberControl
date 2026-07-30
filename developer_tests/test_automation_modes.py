@@ -48,3 +48,34 @@ def test_damaged_optional_mode_file_falls_back_to_packaged_defaults(tmp_path: Pa
     monkeypatch.setattr(automation_modes, "mode_store_path", lambda: store)
     modes = automation_modes.load_automation_modes()
     assert list(modes) == [automation_modes.PACKAGED_DEFAULT_MODE_NAME]
+
+
+def test_skip_degas_is_never_persisted_in_reusable_automation_modes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = tmp_path / "automation_modes.json"
+    monkeypatch.setattr(automation_modes, "mode_store_path", lambda: store)
+
+    mode = _mode("Continuation attempt")
+    mode["phases"]["sputter"]["start_without_degassing"] = True
+    automation_modes.save_automation_mode("Temporary continuation", mode)
+
+    loaded = automation_modes.load_automation_modes()["Temporary continuation"]
+    assert loaded["phases"]["sputter"]["start_without_degassing"] is False
+
+
+def test_legacy_phase4_final_target_is_migrated(tmp_path: Path, monkeypatch) -> None:
+    store = tmp_path / "automation_modes.json"
+    monkeypatch.setattr(automation_modes, "mode_store_path", lambda: store)
+
+    legacy = _mode("Legacy v13 recipe")
+    legacy["phases"]["anneal"]["FINAL_VENT_TARGET_C"] = 30.0
+    store.write_text(
+        __import__("json").dumps({"version": 1, "modes": {"Legacy": legacy}}),
+        encoding="utf-8",
+    )
+
+    loaded = automation_modes.load_automation_modes()["Legacy"]
+    assert "FINAL_VENT_TARGET_C" not in loaded["phases"]["anneal"]
+    assert loaded["phases"]["anneal"]["COOLDOWN_TARGET_C"] == 0.0

@@ -55,7 +55,7 @@ class _FakeSocketModule:
 def _load_isolated_coscon_classes(fake_socket: _FakeSocketModule) -> dict:
     tree = ast.parse(PHASE2_PATH.read_text(encoding="utf-8"))
     selected = []
-    names = {"CosconStatus", "CosconMonitor", "CosconUDP"}
+    names = {"CosconStatus", "CosconMonitor", "CosconDiagnostics", "CosconUDP"}
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name in names:
             selected.append(node)
@@ -172,3 +172,49 @@ def test_phase2_uses_run_only_coscon_target_fields_everywhere() -> None:
     assert "COSCON energy target: {cfg.coscon_energy_v:.1f} V" in text
     assert "COSCON emission target: {cfg.coscon_emission_a * 1000:.3f} mA" in text
 
+
+
+def test_phase2_parses_optional_coscon_diagnostic_values() -> None:
+    fake_socket = _FakeSocketModule(
+        [
+            b"GetDiagnosticValues OK: IEnergy=1.230000e-02 "
+            b"VAnode=1.840000e+02 VRepeller=-2.550000e+01\r",
+        ],
+        ip="192.168.236.186",
+        port=2005,
+    )
+    namespace = _load_isolated_coscon_classes(fake_socket)
+    client = namespace["CosconUDP"]("192.168.236.186", 2005, 2.0)
+
+    diagnostic = client.diagnostics()
+
+    assert fake_socket.sent[0][0] == b"GetDiagnosticValues\r"
+    assert diagnostic.energy_current_a == 0.0123
+    assert diagnostic.anode_voltage_v == 184.0
+    assert diagnostic.repeller_voltage_v == -25.5
+
+
+def test_phase2_rechecks_emission_before_abort_and_displays_new_values() -> None:
+    text = PHASE2_PATH.read_text(encoding="utf-8")
+
+    assert "coscon_emission_fault_samples: int = 3" in text
+    assert "coscon_emission_recheck_s: float = 0.5" in text
+    assert "Consecutive bad reading" in text
+    assert "COSCON emission returned inside tolerance" in text
+    assert "emission_bad_samples >= self.cfg.coscon_emission_fault_samples" in text
+    assert 'id="energyCurrentVal"' in text
+    assert 'id="anodeVoltageVal"' in text
+    assert 'id="repellerVoltageVal"' in text
+    assert 'self.coscon.diagnostics()' in text
+    assert 'self.logger.log_snapshot(self.state.snapshot(), note=warning_note)' in text
+
+
+def test_phase2_supports_explicit_continuation_without_initial_degas() -> None:
+    text = PHASE2_PATH.read_text(encoding="utf-8")
+
+    assert "start_without_degassing: bool = False" in text
+    assert "cycle == 1 and not self.cfg.start_without_degassing" in text
+    assert "INITIAL DEGAS SKIPPED" in text
+    assert "skipping Degas was not explicitly confirmed" in text
+    assert '"start_without_degassing": self.cfg.start_without_degassing' in text
+    assert "Skipped by launcher setting for this continuation run" in text

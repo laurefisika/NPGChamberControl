@@ -76,9 +76,25 @@ class ParameterSpec:
 # and automation behaviour that operators currently change in source code.
 def _ck1_common(*, include_calibration_target: bool) -> tuple[ParameterSpec, ...]:
     specs: list[ParameterSpec] = [
-        ParameterSpec("HEATING_TRIGGER_TEMP_C", "CK-1 ready temperature", 242.0, unit="°C", group="Process targets", description="Temperature required before the shutter-open prompt.", minimum=0, maximum=450),
-        ParameterSpec("CK1_RATE_TARGET_A_PER_S", "CK-1 rate target", 0.40, unit="Å/s", group="Process targets", description="Average QMB rate required before the shutter-open prompt.", minimum=0.001, maximum=5),
+        ParameterSpec("HEATING_TRIGGER_TEMP_C", "CK-1 temperature target / guide", 242.0, unit="°C", group="Process targets", description="Temperature PID target in temperature mode. In rate and compound modes it remains a visual process guide while rate feedback becomes primary.", minimum=0, maximum=450),
+        ParameterSpec("CK1_RATE_TARGET_A_PER_S", "CK-1 rate target", 0.40, unit="Å/s", group="Process targets", description="Target CK-1 QMB deposition rate. It is a readiness threshold in temperature mode and the feedback setpoint in rate/compound modes.", minimum=0.001, maximum=5),
         ParameterSpec("CK1_RATE_AVG_WINDOW_POINTS", "Rate averaging points", 8, kind="int", group="Process targets", description="Number of recent CK-1 rate readings used for the readiness average.", minimum=1, maximum=200),
+        ParameterSpec("EVAPORATION_CONTROL_MODE", "Evaporation feedback mode", "temperature", kind="choice", choices=("temperature", "rate", "compound"), group="Evaporation feedback control", description="temperature preserves the validated temperature PID; rate regulates Keysight current from CK-1 QMB rate; compound is the recommended supervised mode, using rate feedback with a gradual temperature-ceiling override."),
+        ParameterSpec("RATE_CONTROL_MAX_TEMP_C", "Rate-control temperature ceiling", 250.0, unit="°C", group="Evaporation feedback control", description="Maximum CK-1 process temperature used by rate/compound control. The independent watchdog remains above this ceiling by its fixed safety margins.", minimum=0, maximum=450),
+        ParameterSpec("RATE_PID_MIN_CONTROL_TEMP_C", "Minimum temperature for rate PID", 150.0, unit="°C", group="Evaporation feedback control", description="Rate PID cannot take control below this CK-1 temperature, reducing the risk of reacting to low-temperature QMB noise.", minimum=0, maximum=450),
+        ParameterSpec("RATE_PID_ACTIVATION_A_PER_S", "Rate PID activation threshold", 0.05, unit="Å/s", group="Evaporation feedback control", description="Filtered CK-1 rate required before rate feedback takes control from the selected warm-up ramp.", minimum=0.0, maximum=5),
+        ParameterSpec("RATE_PID_FILTER_POINTS", "Rate PID filter points", 7, kind="int", group="Rate PID", description="Newest CK-1 rate readings used by the spike-resistant trimmed average.", minimum=5, maximum=101),
+        ParameterSpec("RATE_PID_READY_STABLE_READS", "Stable in-band rate readings", 6, kind="int", group="Rate PID", description="Consecutive new QMB readings required inside the displayed rate band before the shutter-open prompt in rate/compound modes.", minimum=1, maximum=200),
+        ParameterSpec("RATE_PID_CONTROL_PERIOD_S", "Rate PID control period", 8.0, unit="s", group="Rate PID", description="Minimum time between rate-feedback current corrections.", minimum=0.5, maximum=120),
+        ParameterSpec("RATE_PID_DEADBAND_A_PER_S", "Rate PID dead band", 0.02, unit="Å/s", group="Rate PID", description="No-current-change band around the requested rate, used to avoid chasing QMB noise.", minimum=0.0, maximum=1.0),
+        ParameterSpec("RATE_PID_KP_A_PER_RATE", "Rate PID Kp", 0.020, unit="A/(Å/s)", group="Rate PID", description="Proportional current correction gain for CK-1 rate error.", minimum=0, maximum=1),
+        ParameterSpec("RATE_PID_KI_A_PER_THICKNESS", "Rate PID Ki", 0.00020, unit="A/Å", group="Rate PID", description="Integral gain; rate error integrated over time has thickness units.", minimum=0, maximum=0.1),
+        ParameterSpec("RATE_PID_KD_A_PER_RATE_SLOPE", "Rate PID Kd", 0.0, unit="A/(Å/s²)", group="Rate PID", description="Derivative gain. The conservative packaged value is zero because QMB rate is noisy.", minimum=0, maximum=10),
+        ParameterSpec("RATE_PID_MAX_UP_STEP_A", "Rate PID maximum increase", 0.002, unit="A", group="Rate PID", description="Maximum positive Keysight current correction per rate-PID update.", minimum=0.00001, maximum=0.05),
+        ParameterSpec("RATE_PID_MAX_DOWN_STEP_A", "Rate PID maximum decrease", 0.005, unit="A", group="Rate PID", description="Maximum negative Keysight current correction per rate-PID update; intentionally faster than heating to respond to high rate.", minimum=0.00001, maximum=0.1),
+        ParameterSpec("RATE_PID_INTEGRAL_LIMIT_THICKNESS_A", "Rate PID integral limit", 25.0, unit="Å", group="Rate PID", description="Anti-windup limit for accumulated rate error.", minimum=0, maximum=10000),
+        ParameterSpec("RATE_PID_SIGNAL_TIMEOUT_S", "Rate feedback timeout", 30.0, unit="s", group="Rate PID", description="After rate feedback has taken control, a QMB rate signal older than this causes a safe electrical stop.", minimum=2, maximum=600),
+        ParameterSpec("COMPOUND_TEMP_GUARD_BAND_C", "Compound temperature guard band", 5.0, unit="°C", group="Rate PID", description="Positive rate-PID corrections are progressively reduced within this distance below the rate-control temperature ceiling.", minimum=0, maximum=100),
         ParameterSpec("KEYSIGHT_START_CURRENT_A", "Starting current", 0.005, unit="A", group="Keysight ramp-up", description="Initial non-zero current commanded when automatic heating starts.", minimum=0, maximum=0.670),
         ParameterSpec("KEYSIGHT_BASE_WORK_CURRENT_A", "Base working current", 0.640, unit="A", group="Keysight ramp-up", description="Working-current reference used by the ramp controller.", minimum=0.001, maximum=0.670),
         ParameterSpec("KEYSIGHT_STEP_A", "Current step", 0.005, unit="A", group="Keysight ramp-up", description="Fixed current increment used by step-based ramping.", minimum=0.0001, maximum=0.05),
@@ -117,16 +133,33 @@ PHASE_PARAMETER_SPECS: dict[str, tuple[ParameterSpec, ...]] = {
     "heat": _ck1_common(include_calibration_target=True),
     "sputter": (
         ParameterSpec("cycles", "Number of cycles", 3, kind="int", group="Workflow", description="Number of sputtering-annealing cycles.", minimum=1, maximum=100),
+        ParameterSpec(
+            "start_without_degassing",
+            "Start without initial Degas",
+            False,
+            kind="bool",
+            group="Workflow",
+            description=(
+                "Skip the automatic COSCON Degas before cycle 1. Use only when continuing the same chamber preparation "
+                "after an earlier partial Phase 02 run and the operator has verified that a new Degas is not required."
+            ),
+        ),
         ParameterSpec("degas_timeout_minutes", "Degas safety timeout", 25.0, unit="min", group="Workflow", description="Maximum allowed wait for COSCON Degas to finish naturally in Standby. This is a safety timeout, not the expected Degas duration.", minimum=5, maximum=60),
         ParameterSpec("sputter_minutes", "Sputtering duration", 20.0, unit="min", group="Workflow", description="Countdown duration for each sputtering step.", minimum=0, maximum=1440),
         ParameterSpec("coscon_energy_v", "COSCON energy target", 2250.0, unit="V", group="COSCON sputtering target", description="Beam-energy target sent to ValidateOperateTarget and SwitchToOperate. The packaged default is 2250 V.", minimum=100, maximum=3000),
         ParameterSpec("coscon_emission_a", "COSCON emission target", 0.010, unit="mA", group="COSCON sputtering target", description="Electron-emission target sent to ValidateOperateTarget and SwitchToOperate. The packaged default is 10.0 mA.", minimum=0.002, maximum=0.020, display_scale=0.001),
+        ParameterSpec("coscon_energy_tolerance_v", "Energy tolerance", 50.0, unit="V", group="COSCON safety margins", description="Immediate-abort tolerance around the requested COSCON beam energy.", minimum=1, maximum=500),
+        ParameterSpec("coscon_emission_tolerance_a", "Emission tolerance", 0.001, unit="mA", group="COSCON safety margins", description="Allowed deviation around the emission target before a reading is counted as anomalous.", minimum=0.00001, maximum=0.010, display_scale=0.001),
+        ParameterSpec("coscon_emission_fault_samples", "Bad emission reads before abort", 3, kind="int", group="COSCON safety margins", description="Consecutive out-of-tolerance emission measurements required before safe abort.", minimum=1, maximum=20),
+        ParameterSpec("coscon_emission_recheck_s", "Emission recheck delay", 0.5, unit="s", group="COSCON safety margins", description="Delay before repeating an anomalous emission measurement.", minimum=0.1, maximum=10),
+        ParameterSpec("coscon_stable_samples", "Stable output reads", 5, kind="int", group="COSCON safety margins", description="Consecutive valid energy/emission readings required before sputtering starts.", minimum=1, maximum=50),
         ParameterSpec("anneal_target_c", "Annealing target", 620.0, unit="°C", group="Annealing", description="Oven PID setpoint used for each annealing stage.", minimum=0, maximum=750),
         ParameterSpec("anneal_hold_minutes", "Annealing hold", 10.0, unit="min", group="Annealing", description="Hold duration after the oven reaches the target window.", minimum=0, maximum=1440),
         ParameterSpec("anneal_reset_c", "PID reset after cycle", 0.0, unit="°C", group="Annealing", description="PID setpoint written after each annealing hold.", minimum=0, maximum=750),
-        ParameterSpec("abort_reset_c", "PID reset on abort", 20.0, unit="°C", group="Annealing", description="PID setpoint attempted during an abort.", minimum=0, maximum=750),
+        ParameterSpec("abort_reset_c", "PID reset on abort", 0.0, unit="°C", group="Annealing", description="PID setpoint attempted during an abort. The packaged safe-stop default is 0 °C.", minimum=0, maximum=750),
         ParameterSpec("target_ar_pressure_mbar", "Target Ar pressure", 2.0e-5, unit="mbar", group="Pressure guidance", description="Operator guidance target for argon pressure.", minimum=1e-12, maximum=1),
-        ParameterSpec("pressure_warning_mbar", "Pressure warning threshold", 5.0e-5, unit="mbar", group="Pressure guidance", description="Pressure above which the interface shows a warning.", minimum=1e-12, maximum=1),
+        ParameterSpec("pressure_warning_mbar", "Pressure warning threshold", 3.0e-5, unit="mbar", group="Pressure guidance", description="Pressure above which the interface shows a warning.", minimum=1e-12, maximum=1),
+        ParameterSpec("pressure_emergency_mbar", "Emergency pressure limit", 1.0e-4, unit="mbar", group="Pressure guidance", description="Software emergency limit that immediately stops COSCON operation.", minimum=1e-12, maximum=1),
         ParameterSpec("temperature_reach_tolerance_c", "Target reach tolerance", 5.0, unit="°C", group="Temperature detection", description="The oven is considered near target at target minus this tolerance.", minimum=0, maximum=100),
         ParameterSpec("stable_temperature_reads", "Stable readings required", 3, kind="int", group="Temperature detection", description="Consecutive near-target readings required before the hold starts.", minimum=1, maximum=1000),
         ParameterSpec("try_reset_pid_on_abort", "Reset PID on abort", True, kind="bool", group="Abort behaviour", description="Attempt to write the abort reset setpoint during abort."),
@@ -145,8 +178,7 @@ PHASE_PARAMETER_SPECS: dict[str, tuple[ParameterSpec, ...]] = {
         ParameterSpec("SECOND_STAGE_HOLD_S", "Second-stage hold", 40 * 60, unit="min", group="Annealing recipe", description="Hold duration at the second-stage temperature.", minimum=0, maximum=7 * 24 * 3600, display_scale=60),
         ParameterSpec("STAGE_REACHED_MARGIN_C", "Stage reach margin", 1.0, unit="°C", group="Annealing recipe", description="A ramp is complete when PV is at least target minus this margin.", minimum=0, maximum=100),
         ParameterSpec("COOLDOWN_TARGET_C", "Cooldown target", 0.0, unit="°C", group="Finalization", description="PID setpoint sent after the second hold.", minimum=0, maximum=750),
-        ParameterSpec("POST_COOLDOWN_WAIT_S", "Post-cooldown wait", 10 * 60, unit="min", group="Finalization", description="Wait after writing the cooldown target.", minimum=0, maximum=7 * 24 * 3600, display_scale=60),
-        ParameterSpec("FINAL_VENT_TARGET_C", "Final PID target", 30.0, unit="°C", group="Finalization", description="Final PID setpoint written before normal completion.", minimum=0, maximum=750),
+        ParameterSpec("POST_COOLDOWN_WAIT_S", "Final hold at cooldown target", 10 * 60, unit="min", group="Finalization", description="Time held at the cooldown target before Phase 04 finishes with that same PID setpoint.", minimum=0, maximum=7 * 24 * 3600, display_scale=60),
         ParameterSpec("KEYSIGHT_RAMPDOWN_STEP_A", "Keysight ramp-down step", 0.005, unit="A", group="Keysight ramp-down", description="Current reduction per ramp-down step.", minimum=0.0001, maximum=0.1),
         ParameterSpec("KEYSIGHT_RAMPDOWN_STEP_S", "Keysight step period", 15, kind="int", unit="s", group="Keysight ramp-down", description="Delay between current reductions.", minimum=1, maximum=3600),
         ParameterSpec("FIRST_RAMPDOWN_STEP_DELAY_S", "First ramp-down delay", 10, kind="int", unit="s", group="Keysight ramp-down", description="Delay before the first current reduction.", minimum=0, maximum=3600),
@@ -395,7 +427,19 @@ def validate_phase_values(phase: str, values: Mapping[str, Any]) -> dict[str, An
         if normalized["MID_RAMP_CURRENT_THRESHOLD_A"] > normalized["KEYSIGHT_BASE_WORK_CURRENT_A"]:
             raise ValueError("The middle/late current boundary cannot exceed the base working current.")
         if normalized["STEPS_RAMP_UNTIL_TEMP_C"] > normalized["HEATING_TRIGGER_TEMP_C"]:
-            raise ValueError("Step-mode threshold temperature cannot exceed the CK-1 ready temperature.")
+            raise ValueError("Step-mode threshold temperature cannot exceed the CK-1 temperature target / guide.")
+        if normalized["HEATING_TRIGGER_TEMP_C"] > normalized["RATE_CONTROL_MAX_TEMP_C"]:
+            raise ValueError("The rate-control temperature ceiling cannot be below the CK-1 temperature target / guide.")
+        if normalized["RATE_PID_MIN_CONTROL_TEMP_C"] > normalized["RATE_CONTROL_MAX_TEMP_C"]:
+            raise ValueError("The minimum temperature for rate PID cannot exceed the rate-control temperature ceiling.")
+        if normalized["RATE_PID_ACTIVATION_A_PER_S"] >= normalized["CK1_RATE_TARGET_A_PER_S"]:
+            raise ValueError("The rate PID activation threshold must be below the CK-1 rate target.")
+        if normalized["RATE_PID_DEADBAND_A_PER_S"] >= normalized["CK1_RATE_TARGET_A_PER_S"]:
+            raise ValueError("The rate PID dead band must be smaller than the CK-1 rate target.")
+        if normalized["COMPOUND_TEMP_GUARD_BAND_C"] > (
+            normalized["RATE_CONTROL_MAX_TEMP_C"] - normalized["RATE_PID_MIN_CONTROL_TEMP_C"]
+        ):
+            raise ValueError("The compound temperature guard band is wider than the available rate-control temperature range.")
         if not (
             normalized["TEMP_SLOPE_TARGET_EARLY_C_PER_MIN"]
             >= normalized["TEMP_SLOPE_TARGET_MID_C_PER_MIN"]
@@ -405,8 +449,14 @@ def validate_phase_values(phase: str, values: Mapping[str, Any]) -> dict[str, An
     elif phase == "sputter":
         if normalized["target_ar_pressure_mbar"] > normalized["pressure_warning_mbar"]:
             raise ValueError("The Ar target pressure cannot be above the pressure warning threshold.")
+        if normalized["pressure_warning_mbar"] >= normalized["pressure_emergency_mbar"]:
+            raise ValueError("The emergency pressure limit must be greater than the normal pressure threshold.")
         if normalized["anneal_reset_c"] > normalized["anneal_target_c"]:
             raise ValueError("The PID reset temperature cannot exceed the annealing target.")
+        if normalized["coscon_energy_tolerance_v"] >= normalized["coscon_energy_v"]:
+            raise ValueError("The COSCON energy tolerance must be smaller than the energy target.")
+        if normalized["coscon_emission_tolerance_a"] >= normalized["coscon_emission_a"]:
+            raise ValueError("The COSCON emission tolerance must be smaller than the emission target.")
     elif phase == "anneal":
         if normalized["INITIAL_WAIT_TARGET_C"] > normalized["FIRST_STAGE_TARGET_C"]:
             raise ValueError("The initial wait target cannot exceed the first-stage target.")
