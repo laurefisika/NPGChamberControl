@@ -24,23 +24,22 @@ def test_unified_readme_exists_and_is_useful():
         assert term in text
 
 
-def test_repository_documentation_is_structured_without_obsolete_duplicates():
-    # READ ME.md remains the operating SOP; README.md and docs/ provide the
-    # professional repository overview without duplicating the old package notes.
-    assert Path("README.md").is_file()
-    assert Path("docs").is_dir()
-    for removed_path in [Path("installation_notes"), Path("TEST_REPORT.md")]:
-        assert not removed_path.exists(), f"Obsolete documentation remains: {removed_path}"
+def test_repository_and_operator_documents_have_distinct_roles():
+    # The release package has one operator SOP. The GitHub repository also keeps
+    # a concise project landing page and technical documentation for traceability.
+    repository_readme = Path("README.md")
+    docs = Path("docs")
+    assert repository_readme.is_file()
+    assert "private technical archive" in repository_readme.read_text(encoding="utf-8")
+    assert docs.is_dir()
+    assert (docs / "SAFETY_AND_VALIDATION.md").is_file()
+
+    for path in [Path("installation_notes"), Path("TEST_REPORT.md")]:
+        assert not path.exists(), f"Obsolete duplicate documentation should not exist: {path}"
 
 
 def test_useful_support_documents_are_kept():
-    for path in [
-        "CHANGELOG.md",
-        "CITATION.cff",
-        "LICENSE.md",
-        "SECURITY.md",
-        "SOURCE_CODE_MANIFEST.json",
-    ]:
+    for path in ["CHANGELOG.md", "LICENSE.md", "SOURCE_CODE_MANIFEST.json"]:
         p = Path(path)
         assert p.is_file(), path
         assert p.read_text(encoding="utf-8").strip(), path

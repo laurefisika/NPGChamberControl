@@ -76,12 +76,34 @@ def _workflow_for_key(key: str) -> LegacyWorkflow:
 
 
 def workflow_environment(workflow: LegacyWorkflow, extra_env: dict[str, str] | None = None) -> dict[str, str]:
-    """Return the environment used for a packaged workflow process."""
+    """Return the environment used for a packaged workflow process.
+
+    Every phase is started as a standalone script with its data folder as the
+    working directory.  Add the current project root to ``PYTHONPATH`` so the
+    child process imports this copy of ``npg_chamber`` regardless of whether
+    the folder is named v15, v16, or has been moved elsewhere.
+    """
 
     data_dir = workflow.data_dir
     env = os.environ.copy()
     if extra_env:
         env.update({str(k): str(v) for k, v in extra_env.items()})
+
+    project_root = str(Path(__file__).resolve().parents[2])
+    existing_pythonpath = env.get("PYTHONPATH", "").strip()
+    pythonpath_entries = [
+        entry
+        for entry in existing_pythonpath.split(os.pathsep)
+        if entry.strip()
+    ]
+    pythonpath_entries = [
+        entry
+        for entry in pythonpath_entries
+        if os.path.normcase(os.path.abspath(entry))
+        != os.path.normcase(os.path.abspath(project_root))
+    ]
+    env["PYTHONPATH"] = os.pathsep.join([project_root, *pythonpath_entries])
+
     env["NPG_CHAMBER_WORKFLOW_KEY"] = workflow.key
     env["NPG_CHAMBER_WORKFLOW_TITLE"] = workflow.title
     env["NPG_CHAMBER_PHASE_DATA_DIR"] = str(data_dir)

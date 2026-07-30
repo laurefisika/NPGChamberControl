@@ -1,10 +1,7 @@
 include LICENSE.md
 include CHANGELOG.md
-include CITATION.cff
-include README.md
-include SECURITY.md
 include SOURCE_CODE_MANIFEST.json
-recursive-include docs *.md
+include RATE_PID_VALIDATION.md
 recursive-include npg_chamber/legacy_scripts *.py
 recursive-include original_scripts_backup *.py
 recursive-include diagnostic_tools *.py

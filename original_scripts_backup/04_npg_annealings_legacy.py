@@ -113,7 +113,6 @@ STAGE_REACHED_MARGIN_C = 1.0
 
 COOLDOWN_TARGET_C = 0.0
 POST_COOLDOWN_WAIT_S = 10 * 60
-FINAL_VENT_TARGET_C = 30.0
 
 KEYSIGHT_RAMPDOWN_STEP_A = 0.005
 KEYSIGHT_RAMPDOWN_STEP_S = 15
@@ -1080,20 +1079,34 @@ def run_annealing_sequence(pid: PIDController, state: SharedState) -> None:
         ):
             return
 
-        state.set_phase("RAMP_TO_0", "Setting PID target to 0 °C")
+        state.set_phase("RAMP_TO_0", "Setting oven PID setpoint to 0 °C")
         pid.set_setpoint_c(COOLDOWN_TARGET_C)
 
-        state.set_phase("HOLD_0_AND_FINALIZE", "Holding 0 °C before finalizing at 30 °C", duration_s=POST_COOLDOWN_WAIT_S)
-        if not hold_for_seconds(state, POST_COOLDOWN_WAIT_S, "Holding 0 °C before finalizing at 30 °C"):
+        final_hold_message = (
+            f"Holding oven PID setpoint at {COOLDOWN_TARGET_C:.0f} °C "
+            f"for {POST_COOLDOWN_WAIT_S / 60.0:.1f} min before finishing"
+        )
+        state.set_phase(
+            "HOLD_0_AND_FINALIZE",
+            final_hold_message,
+            duration_s=POST_COOLDOWN_WAIT_S,
+        )
+        if not hold_for_seconds(state, POST_COOLDOWN_WAIT_S, final_hold_message):
             return
 
-        state.set_phase("FINAL_SETPOINT_30", "Annealing sequence finished. Sending 30 °C to the oven PID")
-        pid.set_setpoint_c(FINAL_VENT_TARGET_C)
         state.anneal_finished_normally = True
         state.finished_event.set()
-        state.set_phase("FINISHED", "Annealing finished normally and the oven setpoint was moved to 30 °C")
-        state.set_message("Annealing finished. Oven setpoint sent to 30 °C.")
-        banner("NPG annealing sequence finished. Oven PID setpoint sent to 30 °C.")
+        state.set_phase(
+            "FINISHED",
+            f"Annealing finished normally. Oven PID setpoint remains at {COOLDOWN_TARGET_C:.0f} °C.",
+        )
+        state.set_message(
+            f"Annealing finished. Oven PID setpoint remains at {COOLDOWN_TARGET_C:.0f} °C."
+        )
+        banner(
+            f"NPG annealing sequence finished. Oven PID setpoint remains at "
+            f"{COOLDOWN_TARGET_C:.0f} °C."
+        )
     except KeyboardInterrupt:
         state.stop_event.set()
         raise
@@ -1165,8 +1178,7 @@ def phase_display_info(state: SharedState) -> tuple[str, str]:
         "HOLD_SECOND": (f"HOLDING SECOND STAGE · {second:.0f} °C", "#b45309"),
         "RAMP_TO_0": ("REACHING 0 °C", "#0284c7"),
         "HOLD_0_AND_FINALIZE": ("HOLDING 0 °C · FINALIZING", "#0369a1"),
-        "FINAL_SETPOINT_30": ("FINAL SETPOINT · 30 °C", "#334155"),
-        "FINISHED": ("FINISHED", "#15803d"),
+        "FINISHED": (f"FINISHED · PID SV {COOLDOWN_TARGET_C:.0f} °C", "#15803d"),
         "ABORTING": ("ABORTING SAFELY", "#b91c1c"),
     }
     return mapping.get(state.phase, (str(state.phase).replace("_", " "), "#334155"))
@@ -1183,8 +1195,8 @@ def phase_timeline_text(state: SharedState) -> str:
         f"3. Holding first stage: {first_hold_min:.1f} min\n"
         f"4. Reaching second stage: {second:.1f} °C\n"
         f"5. Holding second stage: {second_hold_min:.1f} min\n"
-        f"6. Reaching 0 °C\n"
-        f"7. Holding 0 °C + final 30 °C"
+        f"6. PID SV {COOLDOWN_TARGET_C:.0f} °C: hold "
+        f"{POST_COOLDOWN_WAIT_S / 60.0:.1f} min, then finish"
     )
 
 
@@ -1323,9 +1335,9 @@ def build_figure() -> tuple[plt.Figure, dict]:
         bbox=dict(boxstyle="round,pad=0.36", facecolor="white", edgecolor="#d0d7de", linewidth=1.0),
     )
 
-    panel_text(0.05, 0.158, "Phase sequence", fontsize=8.7, color="#334155", weight="bold")
+    panel_text(0.05, 0.145, "Phase sequence", fontsize=8.7, color="#334155", weight="bold")
     timeline_text = panel_ax.text(
-        0.05, 0.138, "", transform=panel_ax.transAxes,
+        0.05, 0.125, "", transform=panel_ax.transAxes,
         fontsize=5.95, color="#475569", va="top", ha="left", linespacing=1.00,
     )
 
@@ -1798,7 +1810,10 @@ class App:
             info(f"Invalid second-stage hold time from GUI: {exc}", Fore.RED)
 
     def request_abort_from_gui(self, event=None) -> None:
-        message = "Abort requested from GUI button. Safe shutdown will send oven to 30 °C and switch Keysight OFF."
+        message = (
+            f"Abort requested from GUI button. Safe shutdown will send oven PID SV to "
+            f"{COOLDOWN_TARGET_C:.0f} °C and switch Keysight OFF."
+        )
         banner(message)
         self.state.mark_abort(message)
         self.state.set_phase("ABORTING", message)
@@ -1898,14 +1913,24 @@ class App:
 
         self.state.safe_shutdown_completed = True
         _install_shutdown_signal_ignore_mode()
-        banner("Abort detected. Sending oven PID to 30 °C and switching off the Keysight output.")
+        banner(
+            f"Abort detected. Sending oven PID setpoint to {COOLDOWN_TARGET_C:.0f} °C "
+            "and switching off the Keysight output."
+        )
 
         try:
-            self.pid.set_setpoint_c_best_effort(FINAL_VENT_TARGET_C)
-            self.state.oven_setpoint_c = FINAL_VENT_TARGET_C
-            info(f"Abort safety action: Oven PID setpoint sent to {FINAL_VENT_TARGET_C:.1f} °C.", Fore.MAGENTA)
+            self.pid.set_setpoint_c_best_effort(COOLDOWN_TARGET_C)
+            self.state.oven_setpoint_c = COOLDOWN_TARGET_C
+            info(
+                f"Abort safety action: Oven PID setpoint sent to {COOLDOWN_TARGET_C:.1f} °C.",
+                Fore.MAGENTA,
+            )
         except BaseException as exc:
-            info(f"Abort safety action failed while sending {FINAL_VENT_TARGET_C:.1f} °C to the oven PID: {exc}", Fore.RED)
+            info(
+                f"Abort safety action failed while sending {COOLDOWN_TARGET_C:.1f} °C "
+                f"to the oven PID: {exc}",
+                Fore.RED,
+            )
 
         try:
             self.keysight.shutdown_output()

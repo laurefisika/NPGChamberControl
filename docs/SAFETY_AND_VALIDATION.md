@@ -14,6 +14,7 @@ The integrated package includes, among other checks:
 - exclusion of communication settings and hard electrical limits from routine recipe editing;
 - pressure, current, voltage, temperature, and workflow-state checks inside the relevant phase;
 - watchdog and controlled ramp-down behavior where applicable;
+- stale-rate shutdown, bounded current corrections, anti-windup and independent temperature supervision for the optional CK-1 rate/compound loop;
 - explicit distinction between normal Phase 03 completion and Abort / safe stop;
 - pre- and post-phase COM-port release verification;
 - source hashes for the authoritative scripts and recovery copies;
@@ -23,7 +24,7 @@ These mechanisms reduce foreseeable software and workflow errors. They do not pr
 
 ## Validation evidence
 
-The codebase promoted to `0.9.18` recorded 93 passing tests without chamber hardware on 21 July 2026. The suite covers imports and packaging, GUI behavior, documentation consistency, parameter validation, automation modes, serial handoff, pyrometer parsing and profiles, Phase 02 dashboard logic, Phase 01/03 workflow separation, and source-manifest integrity.
+The codebase promoted to `0.9.21` recorded 125 passing tests without chamber hardware on 30 July 2026. The suite covers imports and packaging, GUI behavior, documentation consistency, parameter validation, automation modes, serial handoff and subprocess import resolution, pyrometer parsing and profiles, Phase 02 dashboard logic, safe-zero completion, Phase 01/03 rate-control integration, pressure alarms, and source-manifest integrity.
 
 Supervised laboratory work also included instrument communication checks, real PID and QMB acquisition, an NPG annealing run, COSCON Degas and Operate trials, pyrometer communication and emissivity verification, and repeated complete-workflow trials that exposed the original COM-port handoff failures.
 
@@ -36,6 +37,7 @@ Before describing the system publicly as fully validated, the laboratory should 
 3. pressure and interlock fault injection;
 4. abort from every reachable Phase 02 state;
 5. at least three complete supervised recipe cycles with post-run hardware inspection;
-6. verification on the exact Windows workstation and instrument configuration used for normal operation.
+6. the first-run, fault-path and gain-tuning checks in `RATE_PID_VALIDATION.md` before routine use of rate or compound feedback;
+7. verification on the exact Windows workstation and instrument configuration used for normal operation.
 
 Public documentation should say "software regression tested and experimentally exercised" unless this complete hardware acceptance record exists.

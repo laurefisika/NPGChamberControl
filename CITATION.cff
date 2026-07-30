@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it using the metadata below."
 title: "NPG Chamber Control"
 type: software
-version: 0.9.18
-date-released: 2026-07-22
+version: 0.9.21
+date-released: 2026-07-30
 authors:
   - given-names: Laura
     family-names: "Rodríguez Jordán"

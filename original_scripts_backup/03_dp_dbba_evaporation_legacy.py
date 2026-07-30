@@ -25,12 +25,21 @@ from npg_chamber.config.run_parameters import (
     write_effective_parameters,
 )
 from npg_chamber.devices.pyrometer import ImpacIPE140, PyrometerProfile, PyrometerSerialConfig
+from npg_chamber.common.pressure_alarm import PressureEmergencyAlarm
 from npg_chamber.common.phase_dashboard_style import (
     AXIS_ACCENTS,
     add_panel_card,
     create_phase_badge,
     style_measurement_axis,
     update_phase_badge,
+)
+from npg_chamber.common.evaporation_control import (
+    CONTROL_MODE_COMPOUND,
+    CONTROL_MODE_RATE,
+    CONTROL_MODE_TEMPERATURE,
+    RatePidConfig,
+    RatePidController,
+    robust_rate_average,
 )
 
 RUN_AUTOMATION_OVERRIDES = load_phase_overrides("dpdbba")
@@ -225,6 +234,15 @@ stop_event = threading.Event()
 data_lock = threading.Lock()
 keysight_lock = threading.Lock()
 state_lock = threading.Lock()
+
+# Desktop alarm: native topmost Windows popup + repeating critical sound.
+# This software warning supplements, but never replaces, hardware interlocks.
+PRESSURE_DESKTOP_ALARM_MBAR = 5.0e-6
+pressure_emergency_alarm = PressureEmergencyAlarm(
+    threshold_mbar=PRESSURE_DESKTOP_ALARM_MBAR,
+    context='Phase 03 - DP-DBBA Evaporation',
+)
+atexit.register(pressure_emergency_alarm.close)
 pid_lock = threading.Lock()
 oven_pid_state = {
     'setpoint_c': None,
@@ -272,6 +290,28 @@ PID_KI_A_PER_C_S = 0.000030
 PID_KD_A_PER_C_PER_S = 0.0030
 PID_MAX_STEP_A = 0.0025
 PID_INTEGRAL_LIMIT_C_S = 250.0
+
+# Selectable CK-1 evaporation feedback strategy.
+# Temperature mode preserves the established controller. Rate mode uses the
+# CK-1 QMB as the primary feedback after a conservative warm-up. Compound mode
+# adds a gradual temperature-ceiling override to rate feedback and is the
+# recommended mode after supervised hardware validation.
+EVAPORATION_CONTROL_MODE = CONTROL_MODE_TEMPERATURE
+RATE_CONTROL_MAX_TEMP_C = 250.0
+RATE_PID_MIN_CONTROL_TEMP_C = 150.0
+RATE_PID_ACTIVATION_A_PER_S = 0.05
+RATE_PID_FILTER_POINTS = 7
+RATE_PID_READY_STABLE_READS = 6
+RATE_PID_CONTROL_PERIOD_S = 8.0
+RATE_PID_DEADBAND_A_PER_S = 0.02
+RATE_PID_KP_A_PER_RATE = 0.020
+RATE_PID_KI_A_PER_THICKNESS = 0.00020
+RATE_PID_KD_A_PER_RATE_SLOPE = 0.0
+RATE_PID_MAX_UP_STEP_A = 0.002
+RATE_PID_MAX_DOWN_STEP_A = 0.005
+RATE_PID_INTEGRAL_LIMIT_THICKNESS_A = 25.0
+RATE_PID_SIGNAL_TIMEOUT_S = 30.0
+COMPOUND_TEMP_GUARD_BAND_C = 5.0
 
 # Independent temperature watchdog.
 # This is intentionally separate from the PID: if the PID misbehaves, stops
@@ -337,6 +377,34 @@ KEYSIGHT_INSTRUMENT_OCP_A = KEYSIGHT_HARD_STOP_A + KEYSIGHT_INSTRUMENT_OCP_MARGI
 KEYSIGHT_INSTRUMENT_OVP_V = KEYSIGHT_HARD_STOP_V + KEYSIGHT_INSTRUMENT_OVP_MARGIN_V
 CK1_RATE_LOW_A_PER_S = CK1_RATE_TARGET_A_PER_S - 0.05
 CK1_RATE_HIGH_A_PER_S = CK1_RATE_TARGET_A_PER_S + 0.05
+
+rate_pid_controller = RatePidController(
+    RatePidConfig(
+        kp_a_per_rate=RATE_PID_KP_A_PER_RATE,
+        ki_a_per_thickness=RATE_PID_KI_A_PER_THICKNESS,
+        kd_a_per_rate_slope=RATE_PID_KD_A_PER_RATE_SLOPE,
+        deadband_rate=RATE_PID_DEADBAND_A_PER_S,
+        max_up_step_a=RATE_PID_MAX_UP_STEP_A,
+        max_down_step_a=RATE_PID_MAX_DOWN_STEP_A,
+        integral_limit_thickness=RATE_PID_INTEGRAL_LIMIT_THICKNESS_A,
+        min_current_a=0.0,
+        max_current_a=KEYSIGHT_SOFT_WARNING_A,
+    )
+)
+rate_pid_state = {
+    'activated': False,
+    'activated_at': None,
+    'last_filtered_rate_a_per_s': None,
+    'last_rate_timestamp': None,
+    'last_ready_sample_timestamp': None,
+    'ready_stable_reads': 0,
+    'last_log_at': 0.0,
+    'hard_stop_triggered': False,
+}
+feedback_control_state = {
+    'active_controller': 'Warm-up ramp',
+    'last_change_at': time.time(),
+}
 ZERO_CURRENT_THRESHOLD_A = RAMPDOWN_ZERO_THRESHOLD_A
 print("\n" + format_override_summary("dpdbba", RUN_AUTOMATION_OVERRIDES) + "\n")
 try:
@@ -431,8 +499,11 @@ def build_run_info_text():
         f"real_sample_thickness_a: {REAL_SAMPLE_THICKNESS_A:.6f}\n"
         f"target_ck1_thickness_a: {TARGET_CK1_THICKNESS_A:.6f}\n"
         f"oven_pid_target_temperature_c: {OVEN_TARGET_TEMPERATURE_C:.1f}\n"
-        f"ready_condition_temperature_c_initial: >= {HEATING_TRIGGER_TEMP_C:.1f}\n"
-        f"ready_condition_avg_rate_a_per_s_initial: >= {CK1_RATE_TARGET_A_PER_S:.3f}\n"
+        f"evaporation_feedback_mode: {EVAPORATION_CONTROL_MODE}\n"
+        f"temperature_target_or_guide_c: {HEATING_TRIGGER_TEMP_C:.1f}\n"
+        f"rate_control_temperature_ceiling_c: {RATE_CONTROL_MAX_TEMP_C:.1f}\n"
+        f"rate_pid_activation_a_per_s: {RATE_PID_ACTIVATION_A_PER_S:.3f}\n"
+        f"ready_condition_avg_rate_a_per_s_initial: {CK1_RATE_TARGET_A_PER_S:.3f}\n"
         f"ready_condition_points: {CK1_RATE_AVG_WINDOW_POINTS}\n"
         f"pid_temp_band_c_initial: {PID_TEMP_BAND_C:.3f}\n"
         f"watchdog_soft_margin_c: {TEMP_WATCHDOG_SOFT_MARGIN_C:.3f}\n"
@@ -452,10 +523,10 @@ def save_run_parameters():
 print(build_run_info_text())
 save_run_parameters()
 
-GUI_REFRESH_INTERVAL_S = 0.15
+GUI_REFRESH_INTERVAL_S = 0.50
 DATA_SAVE_INTERVAL_S = 5.0
-MAX_PLOT_POINTS_PER_SERIES = 1200
-AUTOSCALE_EVERY_N_REFRESHES = 4
+MAX_PLOT_POINTS_PER_SERIES = 400
+AUTOSCALE_EVERY_N_REFRESHES = 10
 # _____________________DEVICE CONFIG____________________________________________
 device_info = {
     'CK-1 evaporator QMB': {'port': 'COM4', 'baud_rate': 115200},
@@ -517,6 +588,31 @@ QMB__commands = {
     'zero': QMB__bytes['STX'] + QMB__bytes['ADDR'] + QMB__bytes['CMD_RSP'] + QMB__sub_commands['zero'] + QMB__calculate_checksum(QMB__bytes['ADDR'] + QMB__bytes['CMD_RSP'] + QMB__sub_commands['zero']) + QMB__bytes['CR'],
 }
 
+TEMPERATURE_VIEW_STYLES = {
+    # The selected live graph, its title and its selector label deliberately use
+    # the same accent so the active signal is obvious at a glance.
+    'oven': {
+        'accent': '#c62828',       # red
+        'inactive': '#fde8e8',
+        'active': '#f8caca',
+        'hover': '#fbdada',
+    },
+    'pyrometer': {
+        'accent': '#1565c0',       # blue
+        'inactive': '#e3f0ff',
+        'active': '#c5ddfa',
+        'hover': '#d7e8fc',
+    },
+    'sample': {
+        'accent': '#d4a000',       # readable yellow / gold on white
+        'inactive': '#fff8cf',
+        'active': '#ffed8a',
+        'hover': '#fff2ad',
+    },
+}
+TEMPERATURE_TITLE_PAD = 4
+TEMPERATURE_SELECTOR_LIFT = 0.040
+
 # _____________________PLOTS____________________________________________________
 fig, ((ax_thickness_ck1, ax_rate_ck1, ax_pressure_xgs600),
       (ax_thickness_sample, ax_rate_sample, ax_temperature_oven),
@@ -532,7 +628,7 @@ line_rate_ck1, = ax_rate_ck1.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['ck1
 line_thickness_sample, = ax_thickness_sample.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['sample'])
 line_rate_sample, = ax_rate_sample.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['sample'])
 line_pressure_xgs600, = ax_pressure_xgs600.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['pressure'])
-line_temperature_oven, = ax_temperature_oven.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['temperature'])
+line_temperature_oven, = ax_temperature_oven.plot([], [], linewidth=2.0, color=TEMPERATURE_VIEW_STYLES['oven']['accent'])
 line_current_keysight, = ax_current_keysight.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['current'])
 line_voltage_keysight, = ax_voltage_keysight.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['voltage'])
 line_temperature_ck1, = ax_temperature_ck1.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['ck1_temperature'])
@@ -551,7 +647,7 @@ plot_axes_config = [
     (ax_thickness_sample, 'Sample QMB thickness', 'Thickness (Å)', AXIS_ACCENTS['sample']),
     (ax_rate_sample, 'Sample QMB rate', 'Rate (Å/s)', AXIS_ACCENTS['sample']),
     (ax_pressure_xgs600, 'Chamber pressure', 'Pressure (mbar)', AXIS_ACCENTS['pressure']),
-    (ax_temperature_oven, 'Oven PID temperature', 'Temperature (ºC)', AXIS_ACCENTS['temperature']),
+    (ax_temperature_oven, 'Oven PID temperature', 'Temperature (ºC)', TEMPERATURE_VIEW_STYLES['oven']['accent']),
     (ax_current_keysight, 'Evaporator current', 'Current (A)', AXIS_ACCENTS['current']),
     (ax_voltage_keysight, 'Evaporator voltage', 'Voltage (V)', AXIS_ACCENTS['voltage']),
     (ax_temperature_ck1, 'CK-1 crucible temperature', 'Temperature (ºC)', AXIS_ACCENTS['ck1_temperature']),
@@ -590,6 +686,8 @@ LIVE_PLOT_ENABLED = True
 LIVE_PLOT_FAILURE_REPORTED = False
 pending_snapshots = []
 pending_snapshots_lock = threading.Lock()
+snapshot_worker_wakeup = threading.Event()
+snapshot_worker_stop_event = threading.Event()
 plot_refresh_counter = 0
 
 pyrometer_reader = None
@@ -659,6 +757,44 @@ def get_ck1_rate_low_a_per_s():
 def get_ck1_rate_high_a_per_s():
     return get_live_heating_targets()['rate_high_a_per_s']
 
+
+
+
+def get_evaporation_control_mode():
+    mode = str(EVAPORATION_CONTROL_MODE).strip().lower()
+    if mode not in {CONTROL_MODE_TEMPERATURE, CONTROL_MODE_RATE, CONTROL_MODE_COMPOUND}:
+        return CONTROL_MODE_TEMPERATURE
+    return mode
+
+
+def evaporation_control_mode_label(mode=None):
+    mode = mode or get_evaporation_control_mode()
+    return {
+        CONTROL_MODE_TEMPERATURE: 'Temperature PID',
+        CONTROL_MODE_RATE: 'Rate PID',
+        CONTROL_MODE_COMPOUND: 'Compound rate + temperature guard',
+    }.get(mode, str(mode))
+
+
+def uses_rate_feedback():
+    return get_evaporation_control_mode() in {CONTROL_MODE_RATE, CONTROL_MODE_COMPOUND}
+
+
+def get_temperature_watchdog_reference_c():
+    if uses_rate_feedback():
+        return float(RATE_CONTROL_MAX_TEMP_C)
+    return get_heating_trigger_temp_c()
+
+
+def set_active_feedback_controller(label):
+    label = str(label)
+    if feedback_control_state.get('active_controller') != label:
+        feedback_control_state['active_controller'] = label
+        feedback_control_state['last_change_at'] = time.time()
+
+
+def get_active_feedback_controller():
+    return feedback_control_state.get('active_controller', '--')
 
 def ck1_rate_band_from_target(rate_target_a_per_s):
     """Return the CK-1 rate acceptance band derived from the target rate.
@@ -736,6 +872,7 @@ def set_live_heating_targets(trigger_temp_c, rate_target_a_per_s, *args):
             pass
 
     reset_temperature_pid('Live temperature target or PID band changed')
+    reset_rate_pid('Live rate target changed')
 
 
 
@@ -1042,6 +1179,7 @@ def set_manual_current_enabled(enabled: bool, source: str = 'GUI', emit_message:
     # Avoid a PID derivative kick or an immediate automated nudge when returning
     # from manual current control.
     reset_temperature_pid('Manual Keysight current control changed')
+    reset_rate_pid('Manual Keysight current control changed')
     keysight_state['last_step_at'] = time.time()
 
     if not enabled:
@@ -1246,26 +1384,34 @@ def _temperature_view_label(mode):
 
 
 def _refresh_temperature_view_button_styles():
-    colors = {
-        'oven': ('#f7c6d8', '#b73364'),
-        'pyrometer': ('#c8eef5', '#147a91'),
-        'sample': ('#fde0bc', '#bd6418'),
-    }
     active = temperature_view_state.get('mode', 'oven')
     for mode, button in temperature_view_buttons.items():
-        inactive_color, active_color = colors[mode]
+        style = TEMPERATURE_VIEW_STYLES[mode]
         selected = mode == active
-        button.color = active_color if selected else inactive_color
-        button.hovercolor = active_color if selected else '#ffffff'
-        button.label.set_color('#ffffff' if selected else '#26384d')
-        button.ax.set_facecolor(button.color)
+        facecolor = style['active'] if selected else style['inactive']
+        button.color = facecolor
+        button.hovercolor = style['hover']
+        button.label.set_color(style['accent'])
+        button.label.set_fontweight('bold')
+        button.ax.set_facecolor(facecolor)
+        for spine in button.ax.spines.values():
+            spine.set_color(style['accent'] if selected else '#cbd5e1')
+            spine.set_linewidth(2.0 if selected else 0.9)
 
 
 def set_temperature_view(mode):
     if mode not in {'oven', 'pyrometer', 'sample'}:
         return
     temperature_view_state['mode'] = mode
-    ax_temperature_oven.set_title(_temperature_view_label(mode), fontsize=10.4, fontweight='bold', color=AXIS_ACCENTS['temperature'], pad=28)
+    accent = TEMPERATURE_VIEW_STYLES[mode]['accent']
+    line_temperature_oven.set_color(accent)
+    ax_temperature_oven.set_title(
+        _temperature_view_label(mode),
+        fontsize=10.4,
+        fontweight='bold',
+        color=accent,
+        pad=TEMPERATURE_TITLE_PAD,
+    )
     _refresh_temperature_view_button_styles()
     try:
         fig.canvas.draw_idle()
@@ -1286,7 +1432,7 @@ def setup_temperature_view_selector():
     original_bbox = ax_temperature_oven.get_position()
     selector_height = 0.020
     selector_gap = 0.004
-    selector_lift = 0.052
+    selector_lift = TEMPERATURE_SELECTOR_LIFT
     graph_header_height = selector_height + selector_gap
     ax_temperature_oven.set_position([
         original_bbox.x0,
@@ -1387,7 +1533,10 @@ def setup_live_target_controls():
             textbox.on_submit(_apply_live_ramp_settings_from_widgets)
             live_ramp_textboxes[key] = textbox
         elif target == 'manual':
-            textbox.on_submit(_apply_manual_current_from_widgets)
+            # Do not bind TextBox.on_submit here. Matplotlib submits a TextBox
+            # when it loses focus, which previously sent the current merely by
+            # clicking elsewhere in the GUI. Only the explicit button below
+            # is allowed to issue a manual Keysight current command.
             live_manual_textboxes[key] = textbox
         else:
             raise ValueError(f'Unknown textbox target: {target}')
@@ -1399,7 +1548,7 @@ def setup_live_target_controls():
     # Editable heating targets
     panel_text(0.05, 0.920, 'Editable heating targets', fontsize=9.3, color='#334155', weight='bold')
     target_box_specs = [
-        ('trigger_temp_c', 'Temp target (ºC)', f"{HEATING_TRIGGER_TEMP_C:.1f}", 0.850),
+        ('trigger_temp_c', 'Temp target / guide (ºC)', f"{HEATING_TRIGGER_TEMP_C:.1f}", 0.850),
         ('rate_target_a_per_s', 'Target CK-1 rate (Å/s)', f"{CK1_RATE_TARGET_A_PER_S:.3f}", 0.800),
         ('pid_temp_band_c', 'PID band (ºC)', f"{PID_TEMP_BAND_C:.1f}", 0.750),
     ]
@@ -1585,6 +1734,48 @@ def copy_data_snapshot():
         }
 
 
+def copy_plot_snapshot(max_points=MAX_PLOT_POINTS_PER_SERIES):
+    """Return a bounded, full-run plot snapshot without copying all history.
+
+    The old GUI copied every recorded point several times per second, then
+    discarded most of them for plotting. As runs grew, that increasingly
+    blocked mouse events. This samples each series while retaining its first-to-
+    last time span and always includes the newest value.
+    """
+
+    def sample(values):
+        n = len(values)
+        if n <= max_points:
+            return list(values)
+        step = max(1, math.ceil(n / max_points))
+        sampled = list(values[::step])
+        if sampled and sampled[-1] != values[-1]:
+            sampled.append(values[-1])
+        return sampled
+
+    with data_lock:
+        return {
+            device: {series_key: sample(series_values) for series_key, series_values in series.items()}
+            for device, series in data.items()
+        }
+
+
+def periodic_data_saver():
+    """Write the existing complete text files outside the GUI event loop."""
+
+    while not stop_event.wait(DATA_SAVE_INTERVAL_S):
+        try:
+            write_data_files(copy_data_snapshot())
+        except Exception as exc:
+            print(f'Periodic data save failed: {exc}')
+
+    # Preserve one final complete save during normal finish or safe stop.
+    try:
+        write_data_files(copy_data_snapshot())
+    except Exception as exc:
+        print(f'Final data save failed: {exc}')
+
+
 def update_live_dashboard_text(snapshot=None):
     if live_dashboard_text is None:
         return
@@ -1622,6 +1813,8 @@ def update_live_dashboard_text(snapshot=None):
 
     lines = [
         f'Phase: {phase}',
+        f'Feedback mode: {evaporation_control_mode_label()}',
+        f'Active control: {get_active_feedback_controller()}',
         f'Shutter: {shutter_status}',
         f'Current mode: Manual {manual_mode}',
         f'Manual I: {float(manual_applied):.3f} A' if manual_applied is not None else 'Manual I: --',
@@ -1631,7 +1824,8 @@ def update_live_dashboard_text(snapshot=None):
         f'Slopes E/M/L: {ramp_settings["slope_early_c_per_min"]:.1f}/'
         f'{ramp_settings["slope_mid_c_per_min"]:.1f}/'
         f'{ramp_settings["slope_late_c_per_min"]:.1f}',
-        f'Target T: {targets["trigger_temp_c"]:.1f} ºC',
+        f'Target T / guide: {targets["trigger_temp_c"]:.1f} ºC',
+        f'Rate-mode max T: {RATE_CONTROL_MAX_TEMP_C:.1f} ºC',
         f'Target rate: {targets["rate_target_a_per_s"]:.3f} Å/s',
         f'Band: {targets["rate_low_a_per_s"]:.3f}-{targets["rate_high_a_per_s"]:.3f}',
         f'DP target: {TARGET_CK1_THICKNESS_A:.2f} Å',
@@ -1714,6 +1908,28 @@ def average_ck1_rate(num_points=CK1_RATE_AVG_WINDOW_POINTS):
         return None
     window = rates[-num_points:]
     return sum(window) / len(window)
+
+
+def filtered_ck1_rate(num_points=RATE_PID_FILTER_POINTS):
+    with data_lock:
+        rates = list(data['CK-1 evaporator QMB']['rate_data'])
+    return robust_rate_average(rates, num_points)
+
+
+def latest_ck1_rate_timestamp():
+    with data_lock:
+        times = data['CK-1 evaporator QMB']['rate_times']
+        return times[-1] if times else None
+
+
+def latest_ck1_rate_age_s():
+    timestamp = latest_ck1_rate_timestamp()
+    if timestamp is None:
+        return None
+    try:
+        return max(0.0, time.time() - timestamp.timestamp())
+    except Exception:
+        return None
 
 
 def estimate_ck1_temp_slope_c_per_min(num_points=TEMP_SLOPE_WINDOW_POINTS):
@@ -1804,20 +2020,31 @@ def clamp(value, low, high):
 
 
 def heating_ready_for_shutter(ck1_temp, ck1_rate_avg):
-    """Return True when CK-1 is hot enough and the average rate has reached target.
+    """Return True when the selected feedback mode is stable enough for shutter opening."""
+    if get_evaporation_control_mode() == CONTROL_MODE_TEMPERATURE:
+        return (
+            ck1_temp is not None and ck1_temp >= get_heating_trigger_temp_c()
+            and ck1_rate_avg is not None
+            and ck1_rate_avg >= get_ck1_rate_target_a_per_s()
+        )
 
-    The upper rate limit is intentionally NOT used as a blocking condition here:
-    if the average CK-1 rate goes above the old `rate_high` value, the script should
-    still move to WAIT_SHUTTER_OPEN. Once the temperature target band is reached,
-    the temperature PID hold keeps regulating the Keysight current.
-    """
-    target_temp = get_heating_trigger_temp_c()
-    rate_target = get_ck1_rate_target_a_per_s()
-    return (
-        ck1_temp is not None and ck1_temp >= target_temp
-        and ck1_rate_avg is not None
-        and ck1_rate_avg >= rate_target
-    )
+    filtered_rate = filtered_ck1_rate()
+    sample_timestamp = latest_ck1_rate_timestamp()
+    if sample_timestamp != rate_pid_state.get('last_ready_sample_timestamp'):
+        rate_pid_state['last_ready_sample_timestamp'] = sample_timestamp
+        inside_band = (
+            rate_pid_state.get('activated', False)
+            and ck1_temp is not None
+            and float(ck1_temp) >= RATE_PID_MIN_CONTROL_TEMP_C
+            and filtered_rate is not None
+            and get_ck1_rate_low_a_per_s() <= filtered_rate <= get_ck1_rate_high_a_per_s()
+        )
+        if inside_band:
+            rate_pid_state['ready_stable_reads'] += 1
+        else:
+            rate_pid_state['ready_stable_reads'] = 0
+
+    return rate_pid_state.get('ready_stable_reads', 0) >= RATE_PID_READY_STABLE_READS
 
 
 def current_phase():
@@ -1880,8 +2107,11 @@ def reset_evaporation_measurement_window():
                 qmb_thickness_offsets[key] = raw_thickness
 
         for qmb_name in QMBs:
-            for series in data[qmb_name].values():
-                series.clear()
+            # Restart only the thickness window. The CK-1 rate history must stay
+            # continuous because rate/compound feedback remains active while the
+            # shutter is opened and throughout the deposition.
+            data[qmb_name]['thickness_times'].clear()
+            data[qmb_name]['thickness_data'].clear()
 
     with state_lock:
         process_state['baseline_ck1_thickness'] = 0.0
@@ -1895,17 +2125,43 @@ def reset_evaporation_measurement_window():
 def request_snapshot(tag: str):
     with pending_snapshots_lock:
         pending_snapshots.append(tag)
+    snapshot_worker_wakeup.set()
+
+
+def _pop_pending_snapshot_tags():
+    with pending_snapshots_lock:
+        if not pending_snapshots:
+            return []
+        tags = pending_snapshots[:]
+        pending_snapshots.clear()
+        return tags
 
 
 def process_pending_snapshots():
-    tags = []
-    with pending_snapshots_lock:
-        if pending_snapshots:
-            tags = pending_snapshots[:]
-            pending_snapshots.clear()
+    # Compatibility helper used by shutdown paths. Rendering is deliberately
+    # performed by snapshot_saver_worker, never by the Matplotlib mouse/event loop.
+    snapshot_worker_wakeup.set()
 
-    for tag in tags:
-        save_snapshot(tag)
+
+def snapshot_saver_worker():
+    """Render graph snapshots off the GUI thread so clicks stay responsive."""
+
+    while True:
+        snapshot_worker_wakeup.wait(0.50)
+        snapshot_worker_wakeup.clear()
+
+        while True:
+            tags = _pop_pending_snapshot_tags()
+            if not tags:
+                break
+            for tag in tags:
+                save_snapshot(tag)
+
+        if snapshot_worker_stop_event.is_set():
+            with pending_snapshots_lock:
+                queue_empty = not pending_snapshots
+            if queue_empty:
+                break
 
 
 def force_keysight_zero_output(reason: str = 'Force Keysight zero output'):
@@ -2098,21 +2354,21 @@ def save_graphs_only_snapshot(tag: str, path: str, snapshot=None):
         source['Oven PID temperature']['temperature_times'],
         source['Oven PID temperature']['temperature_data'],
         linewidth=1.6,
-        color='magenta',
+        color=TEMPERATURE_VIEW_STYLES['oven']['accent'],
         label='Oven PID',
     )
     fax_temperature_oven.plot(
         source['IMPAC pyrometer']['temperature_times'],
         source['IMPAC pyrometer']['temperature_data'],
         linewidth=1.6,
-        color='deepskyblue',
+        color=TEMPERATURE_VIEW_STYLES['pyrometer']['accent'],
         label='Pyrometer raw',
     )
     fax_temperature_oven.plot(
         source['IMPAC pyrometer']['temperature_times'],
         source['IMPAC pyrometer']['sample_temperature_data'],
         linewidth=1.6,
-        color='darkorange',
+        color=TEMPERATURE_VIEW_STYLES['sample']['accent'],
         label='Sample estimate',
     )
     fax_temperature_oven.set_title('Temperature comparison', fontsize=11, pad=10)
@@ -2174,6 +2430,10 @@ def save_phase_summary(tag: str):
             f.write(f"saved_at: {datetime.now().isoformat()}\n")
             f.write(f"phase: {current_phase()}\n")
             f.write(f"transition_reason: {process_state['transition_reason']}\n")
+            f.write(f"evaporation_feedback_mode: {get_evaporation_control_mode()}\n")
+            f.write(f"active_feedback_controller: {get_active_feedback_controller()}\n")
+            f.write(f"filtered_ck1_rate_a_per_s: {filtered_ck1_rate()}\n")
+            f.write(f"rate_control_temperature_ceiling_c: {RATE_CONTROL_MAX_TEMP_C}\n")
             f.write(f"ck1_temp_c: {latest_ck1_temperature()}\n")
             f.write(f"ck1_thickness_a: {latest_ck1_thickness()}\n")
             f.write(f"sample_thickness_a: {latest_sample_thickness()}\n")
@@ -2609,7 +2869,21 @@ def update_live_plot(snapshot, force_autoscale=False):
         display_values = oven_temp_values
         display_info = f'{oven_last:.1f} ºC' if oven_last is not None else '--'
 
-    ax_temperature_oven.set_title(_temperature_view_label(temperature_mode), fontsize=10.6, fontweight='bold', color=AXIS_ACCENTS['temperature'], pad=8)
+    desired_temperature_title = _temperature_view_label(temperature_mode)
+    temperature_accent = TEMPERATURE_VIEW_STYLES[temperature_mode]['accent']
+    if line_temperature_oven.get_color() != temperature_accent:
+        line_temperature_oven.set_color(temperature_accent)
+    if (
+        ax_temperature_oven.get_title() != desired_temperature_title
+        or ax_temperature_oven.title.get_color() != temperature_accent
+    ):
+        ax_temperature_oven.set_title(
+            desired_temperature_title,
+            fontsize=10.6,
+            fontweight='bold',
+            color=temperature_accent,
+            pad=TEMPERATURE_TITLE_PAD,
+        )
     _update_axis(
         ax_temperature_oven, line_temperature_oven, display_times, display_values, 'oven_temp',
         display_info
@@ -2748,6 +3022,7 @@ def read_pressure():
             time.sleep(0.1)
             msg = connections[key].read(connections[key].in_waiting or 100).decode(errors='ignore').strip().lstrip('>')
             pressure_value = float(msg)
+            pressure_emergency_alarm.update(pressure_value)
             ts, formatted, dec = log_timestamp()
             with data_lock:
                 data[key]['pressure_times'].append(ts)
@@ -3241,6 +3516,153 @@ def read_arduino():
 
 
 # _____________________TEMPERATURE PID CONTROL___________________________________
+
+
+
+
+
+
+def reset_rate_pid(reason: str = ''):
+    rate_pid_controller.reset()
+    rate_pid_state['activated'] = False
+    rate_pid_state['activated_at'] = None
+    rate_pid_state['last_filtered_rate_a_per_s'] = None
+    rate_pid_state['last_rate_timestamp'] = None
+    rate_pid_state['last_ready_sample_timestamp'] = None
+    rate_pid_state['ready_stable_reads'] = 0
+    rate_pid_state['hard_stop_triggered'] = False
+    if reason:
+        ts, formatted, dec = log_timestamp()
+        print(
+            f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - "
+            f"{Fore.CYAN}Rate PID reset: {reason}{Style.RESET_ALL}"
+        )
+
+
+def _rate_feedback_hard_stop(reason: str):
+    if rate_pid_state.get('hard_stop_triggered'):
+        return
+    rate_pid_state['hard_stop_triggered'] = True
+    rate_pid_controller.reset()
+    reset_temperature_pid('Rate-feedback safety stop')
+    set_phase('SAFETY_STOP', reason)
+    request_snapshot('rate_feedback_hard_stop')
+    save_phase_summary('rate_feedback_hard_stop')
+    stop_keysight_output(reason)
+    stop_event.set()
+    print_banner(
+        "RATE FEEDBACK HARD STOP\n"
+        f"{reason}\n"
+        "Keysight current was forced to 0 A and output was switched OFF."
+    )
+
+
+def rate_feedback_can_control(current_temp, filtered_rate):
+    if not uses_rate_feedback():
+        return False
+    if current_temp is None or float(current_temp) < RATE_PID_MIN_CONTROL_TEMP_C:
+        return False
+    if filtered_rate is None:
+        return False
+    rate_age_s = latest_ck1_rate_age_s()
+    if rate_age_s is None or rate_age_s > RATE_PID_SIGNAL_TIMEOUT_S:
+        return False
+
+    if not rate_pid_state.get('activated'):
+        activation_threshold = min(
+            RATE_PID_ACTIVATION_A_PER_S,
+            max(0.0, get_ck1_rate_target_a_per_s() * 0.5),
+        )
+        if float(filtered_rate) < activation_threshold:
+            return False
+        rate_pid_controller.reset()
+        rate_pid_state['activated'] = True
+        rate_pid_state['activated_at'] = time.time()
+        print_banner(
+            f"Rate feedback activated at T={float(current_temp):.2f} ºC and "
+            f"filtered CK-1 rate={float(filtered_rate):.3f} Å/s.\n"
+            f"Selected mode: {evaporation_control_mode_label()}."
+        )
+    return True
+
+
+def check_active_rate_signal_or_stop():
+    if not uses_rate_feedback() or not rate_pid_state.get('activated'):
+        return True
+    age_s = latest_ck1_rate_age_s()
+    if age_s is None or age_s > RATE_PID_SIGNAL_TIMEOUT_S:
+        _rate_feedback_hard_stop(
+            'CK-1 rate feedback became unavailable or stale after control handover '
+            f'(age={age_s if age_s is not None else "unknown"} s; '
+            f'limit={RATE_PID_SIGNAL_TIMEOUT_S:.1f} s).'
+        )
+        return False
+    return True
+
+
+def apply_rate_pid_control(current_temp, current_setpoint=None, filtered_rate=None):
+    if filtered_rate is None:
+        filtered_rate = filtered_ck1_rate()
+    if filtered_rate is None:
+        return False
+
+    if current_setpoint is None:
+        current_setpoint = keysight_state.get('set_current_a')
+    if current_setpoint is None:
+        current_setpoint = latest_value('Keysight power supply', 'current_data') or 0.0
+
+    mode = get_evaporation_control_mode()
+    now = time.time()
+    decision = rate_pid_controller.update(
+        target_rate=get_ck1_rate_target_a_per_s(),
+        measured_rate=filtered_rate,
+        current_setpoint_a=current_setpoint,
+        now_s=now,
+        # Both feedback modes block positive corrections at the ceiling. Compound
+        # mode additionally tapers them throughout the guard band.
+        compound_temperature_guard=True,
+        current_temperature_c=current_temp,
+        maximum_temperature_c=RATE_CONTROL_MAX_TEMP_C,
+        temperature_guard_band_c=(COMPOUND_TEMP_GUARD_BAND_C if mode == CONTROL_MODE_COMPOUND else 0.0),
+    )
+    rate_pid_state['last_filtered_rate_a_per_s'] = float(filtered_rate)
+    rate_pid_state['last_rate_timestamp'] = latest_ck1_rate_timestamp()
+    # Mark every PID evaluation, including a dead-band hold, so the configured
+    # control period is respected and the integral cannot update at GUI-loop speed.
+    keysight_state['last_step_at'] = now
+
+    controller_label = 'Rate PID'
+    if decision.temperature_limited:
+        controller_label = 'Rate PID + temperature ceiling'
+    set_active_feedback_controller(controller_label)
+
+    if decision.inside_deadband or abs(decision.delta_a) < 1e-9:
+        if now - rate_pid_state.get('last_log_at', 0.0) >= 15.0:
+            extra = ' Temperature ceiling limited positive correction.' if decision.temperature_limited else ''
+            print(
+                f"Rate PID hold: filtered rate={filtered_rate:.3f} Å/s, "
+                f"target={get_ck1_rate_target_a_per_s():.3f} Å/s, "
+                f"dead band=±{RATE_PID_DEADBAND_A_PER_S:.3f} Å/s; "
+                f"holding current at {float(current_setpoint):.3f} A.{extra}"
+            )
+            rate_pid_state['last_log_at'] = now
+        return False
+
+    changed = nudge_keysight_current(
+        decision.delta_a,
+        (
+            f'Rate PID: filtered={filtered_rate:.3f} Å/s, '
+            f'target={get_ck1_rate_target_a_per_s():.3f} Å/s, '
+            f'error={decision.error_rate:+.3f} Å/s, '
+            f'P/I/D delta={decision.raw_delta_a:+.5f} A'
+            + ('; temperature ceiling limited increase' if decision.temperature_limited else '')
+        ),
+        max_current=KEYSIGHT_SOFT_WARNING_A,
+    )
+    if changed:
+        keysight_state['last_step_at'] = now
+    return changed
+
 def reset_temperature_pid(reason: str = ''):
     temperature_pid_state['integral_error_c_s'] = 0.0
     temperature_pid_state['last_error_c'] = None
@@ -3253,12 +3675,12 @@ def reset_temperature_pid(reason: str = ''):
         )
 
 
-def apply_temperature_pid_control(current_temp, current_setpoint=None):
+def apply_temperature_pid_control(current_temp, current_setpoint=None, target_temp_override=None):
     """Regulate Keysight current to hold CK-1 temperature around the live target."""
     if current_temp is None:
         return False
 
-    target_temp = get_heating_trigger_temp_c()
+    target_temp = get_heating_trigger_temp_c() if target_temp_override is None else float(target_temp_override)
     band_c = get_pid_temp_band_c()
     now = time.time()
 
@@ -3352,6 +3774,7 @@ def _temperature_watchdog_active_now():
 def _temperature_watchdog_hard_stop(reason: str):
     temperature_watchdog_state['hard_stop_triggered'] = True
     reset_temperature_pid('Temperature watchdog hard stop')
+    rate_pid_controller.reset()
     set_phase('SAFETY_STOP', reason)
     request_snapshot('temperature_watchdog_hard_stop')
     save_phase_summary('temperature_watchdog_hard_stop')
@@ -3370,6 +3793,7 @@ def _temperature_watchdog_soft_action(current_temp: float, soft_limit: float, ta
         return
 
     reset_temperature_pid('Temperature watchdog soft over-temperature')
+    rate_pid_controller.reset()
     current_setpoint = keysight_state.get('set_current_a')
     if current_setpoint is None:
         current_setpoint = latest_value('Keysight power supply', 'current_data') or 0.0
@@ -3412,7 +3836,7 @@ def temperature_safety_watchdog():
                 continue
 
             now = time.time()
-            target_temp = get_heating_trigger_temp_c()
+            target_temp = get_temperature_watchdog_reference_c()
             soft_limit = target_temp + TEMP_WATCHDOG_SOFT_MARGIN_C
             hard_limit = target_temp + TEMP_WATCHDOG_HARD_MARGIN_C
             current_temp = latest_ck1_temperature()
@@ -3487,30 +3911,25 @@ def automate_keysight_heating():
         configure_keysight_for_automation()
         initial_ramp = get_live_ramp_settings()
         print_banner(
-            f"Keysight automation started. Current starts at {KEYSIGHT_START_CURRENT_A:.3f} A "
-            f"and ramps up using the selected ramp-up mode until the CK-1 approaches the "
-            f"editable temperature target.\n"
-            f"Temperature PID then keeps CK-1 around target ±{get_pid_temp_band_c():.1f} ºC.\n"
-            f"Independent temperature watchdog: soft action at target + {TEMP_WATCHDOG_SOFT_MARGIN_C:.1f} ºC; "
-            f"hard stop at target + {TEMP_WATCHDOG_HARD_MARGIN_C:.1f} ºC; "
-            f"sensor stale timeout {TEMP_WATCHDOG_SENSOR_STALE_TIMEOUT_S:.0f} s.\n"
+            f"Keysight automation started with feedback mode: {evaporation_control_mode_label()}.\n"
+            f"Warm-up uses {ramp_mode_label(initial_ramp['mode'])}; rate/compound modes hand over "
+            f"after T >= {RATE_PID_MIN_CONTROL_TEMP_C:.1f} ºC and filtered rate reaches "
+            f"{RATE_PID_ACTIVATION_A_PER_S:.3f} Å/s (or half of a lower target).\n"
+            f"Temperature PID target / guide: {get_heating_trigger_temp_c():.1f} ºC. "
+            f"Rate-control ceiling: {RATE_CONTROL_MAX_TEMP_C:.1f} ºC.\n"
             f"Normal current cap: {KEYSIGHT_SOFT_WARNING_A:.3f} A. "
             f"Software hard current stop: {KEYSIGHT_HARD_STOP_A:.3f} A. "
             f"Keysight OCP latch: {KEYSIGHT_INSTRUMENT_OCP_A:.3f} A.\n"
             f"Voltage compliance limit: {KEYSIGHT_VOLTAGE_LIMIT_V:.3f} V. "
             f"Software hard voltage stop: {KEYSIGHT_HARD_STOP_V:.3f} V. "
-            f"Keysight OVP latch: {KEYSIGHT_INSTRUMENT_OVP_V:.3f} V.\n"
-            f"Initial ramp mode: {ramp_mode_label(initial_ramp['mode'])}; "
-            f"fixed steps of {KEYSIGHT_STEP_A:.3f} A every "
-            f"{initial_ramp['steps_step_period_s']:.1f} s until "
-            f"{initial_ramp['steps_until_temp_c']:.1f} ºC."
+            f"Keysight OVP latch: {KEYSIGHT_INSTRUMENT_OVP_V:.3f} V."
         )
 
+        active_phases = ('HEATING_UP', 'WAIT_SHUTTER_OPEN', 'EVAPORATION', 'WAIT_SHUTTER_CLOSE')
         while not stop_event.is_set():
             phase = current_phase()
-
-            if phase not in ('HEATING_UP', 'WAIT_SHUTTER_OPEN', 'EVAPORATION', 'WAIT_SHUTTER_CLOSE'):
-                reset_temperature_pid(f'Phase {phase} is not PID-controlled')
+            if phase not in active_phases:
+                set_active_feedback_controller('Inactive')
                 time.sleep(0.5)
                 continue
 
@@ -3520,6 +3939,7 @@ def automate_keysight_heating():
 
             current_temp = latest_ck1_temperature()
             ck1_rate_avg = average_ck1_rate()
+            filtered_rate = filtered_ck1_rate()
             current_setpoint = keysight_state['set_current_a']
             if current_setpoint is None:
                 current_setpoint = KEYSIGHT_START_CURRENT_A
@@ -3549,6 +3969,7 @@ def automate_keysight_heating():
                     keysight_state['last_soft_cap_warning_at'] = now
 
             if manual_current_is_enabled():
+                set_active_feedback_controller('Manual current')
                 now = time.time()
                 with manual_current_lock:
                     last_log = manual_current_state.get('last_hold_log_at', 0.0)
@@ -3557,44 +3978,60 @@ def automate_keysight_heating():
                         should_log_manual_hold = True
                     else:
                         should_log_manual_hold = False
-
                 if should_log_manual_hold:
-                    ts, formatted, dec = log_timestamp()
                     print(
-                        f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - "
-                        f"{Fore.YELLOW}Manual Keysight current control is active: "
-                        f"automation Steps/Slope/PID current corrections are paused; "
-                        f"holding software setpoint at {keysight_state.get('set_current_a')} A."
-                        f"{Style.RESET_ALL}"
+                        f"Manual Keysight current control is active: automatic ramp/PID corrections "
+                        f"are paused; holding software setpoint at {keysight_state.get('set_current_a')} A."
                     )
                 keysight_state['last_step_at'] = now
                 time.sleep(0.5)
                 continue
 
+            mode = get_evaporation_control_mode()
             now = time.time()
-            if now - keysight_state['last_step_at'] < PID_CONTROL_PERIOD_S:
+            control_period_s = PID_CONTROL_PERIOD_S if mode == CONTROL_MODE_TEMPERATURE else RATE_PID_CONTROL_PERIOD_S
+            if now - keysight_state['last_step_at'] < control_period_s:
                 time.sleep(0.5)
                 continue
 
-            # After the heating target has been reached, keep using PID during
-            # shutter waiting and dp_dbba_evaporation. Do not freeze the current in HOLD.
-            if phase != 'HEATING_UP':
-                apply_temperature_pid_control(current_temp, current_setpoint)
-                time.sleep(0.5)
-                continue
-
-            # During HEATING_UP, use the chosen ramp-up strategy only while we are
-            # clearly below the target band. Around the target, PID takes over.
-            if should_use_temperature_pid(current_temp):
-                apply_temperature_pid_control(current_temp, current_setpoint)
-                time.sleep(0.5)
-                continue
-
-            # If the shutter condition is already satisfied, process_controller will
-            # switch phase. The automation only keeps the present current briefly.
-            if heating_ready_for_shutter(current_temp, ck1_rate_avg):
-                time.sleep(0.5)
-                continue
+            if mode == CONTROL_MODE_TEMPERATURE:
+                set_active_feedback_controller('Temperature PID' if phase != 'HEATING_UP' or should_use_temperature_pid(current_temp) else 'Warm-up ramp')
+                if phase != 'HEATING_UP':
+                    apply_temperature_pid_control(current_temp, current_setpoint)
+                    time.sleep(0.5)
+                    continue
+                if should_use_temperature_pid(current_temp):
+                    apply_temperature_pid_control(current_temp, current_setpoint)
+                    time.sleep(0.5)
+                    continue
+                if heating_ready_for_shutter(current_temp, ck1_rate_avg):
+                    time.sleep(0.5)
+                    continue
+            else:
+                if not check_active_rate_signal_or_stop():
+                    time.sleep(0.5)
+                    continue
+                if rate_feedback_can_control(current_temp, filtered_rate):
+                    apply_rate_pid_control(current_temp, current_setpoint, filtered_rate)
+                    time.sleep(0.5)
+                    continue
+                if phase != 'HEATING_UP':
+                    # A rate-controlled deposition phase must never resume warm-up
+                    # ramping after handover. Hold current until the next valid rate
+                    # sample, and the timeout above will stop safely if it remains lost.
+                    set_active_feedback_controller('Rate signal hold')
+                    time.sleep(0.5)
+                    continue
+                if current_temp is not None and float(current_temp) >= RATE_CONTROL_MAX_TEMP_C:
+                    set_active_feedback_controller('Temperature ceiling hold')
+                    apply_temperature_pid_control(
+                        current_temp,
+                        current_setpoint,
+                        target_temp_override=RATE_CONTROL_MAX_TEMP_C,
+                    )
+                    time.sleep(0.5)
+                    continue
+                set_active_feedback_controller('Warm-up ramp before rate handover')
 
             maybe_auto_switch_steps_to_slope(current_temp)
             step_period_s = current_ramp_step_period_s(current_temp, current_setpoint)
@@ -3654,33 +4091,33 @@ def process_controller():
         if phase == 'HEATING_UP':
             trigger_reason = None
             if heating_ready_for_shutter(ck1_temp, ck1_rate_avg):
-                rate_high = get_ck1_rate_high_a_per_s()
-                trigger_reason = (
-                    f'CK-1 temperature reached {ck1_temp:.1f} ºC and '
-                    f'average CK-1 rate reached the target '
-                    f'>= {get_ck1_rate_target_a_per_s():.2f} Å/s '
-                    f'(measured {ck1_rate_avg:.2f} Å/s over the last {CK1_RATE_AVG_WINDOW_POINTS} points; '
-                    f'upper band value {rate_high:.2f} Å/s is not blocking)'
-                )
+                if get_evaporation_control_mode() == CONTROL_MODE_TEMPERATURE:
+                    trigger_reason = (
+                        f'CK-1 temperature reached {ck1_temp:.1f} ºC and average CK-1 rate reached '
+                        f'>= {get_ck1_rate_target_a_per_s():.2f} Å/s '
+                        f'(measured {ck1_rate_avg:.2f} Å/s).'
+                    )
+                else:
+                    filtered_rate = filtered_ck1_rate()
+                    trigger_reason = (
+                        f'{evaporation_control_mode_label()} stabilized the filtered CK-1 rate '
+                        f'inside {get_ck1_rate_low_a_per_s():.2f}-{get_ck1_rate_high_a_per_s():.2f} Å/s '
+                        f'for {RATE_PID_READY_STABLE_READS} consecutive QMB readings '
+                        f'(measured {filtered_rate:.3f} Å/s; CK-1 T={ck1_temp:.1f} ºC).'
+                    )
 
             if trigger_reason is not None:
-                reset_temperature_pid('Heating target reached; PID hold continues')
                 request_snapshot('heating_end')
                 save_phase_summary('heating_end')
                 with state_lock:
-                    # DP-DBBA relative evaporation values start only after Open Shutter confirmation.
-                    process_state['baseline_ck1_thickness'] = None
-                    process_state['baseline_sample_thickness'] = None
-                    process_state['plots_reset_for_evaporation'] = False
                     process_state['snapshot_taken'] = True
                     process_state['shutter_open_confirmed'] = False
                     process_state['shutter_close_confirmed'] = False
                 set_phase('WAIT_SHUTTER_OPEN', trigger_reason)
                 print_banner(
                     f"Heating phase finished: {trigger_reason}\n"
-                    f"Temperature PID remains active; current is not frozen in HOLD.\n"
-                    f"NOW OPEN THE SHUTTER and click the Open Shutter button.\n"
-                    f"Target CK-1 thickness for DP-DBBA = {TARGET_CK1_THICKNESS_A:.2f} Å"
+                    f"{evaporation_control_mode_label()} remains active; current is not frozen in HOLD.\n"
+                    f"NOW OPEN THE SHUTTER and click the Open Shutter button."
                 )
 
         elif phase == 'WAIT_SHUTTER_OPEN':
@@ -3791,6 +4228,8 @@ def main():
     threads = [
         threading.Thread(target=monitor_qmb, daemon=True),
         threading.Thread(target=read_pressure, daemon=True),
+        threading.Thread(target=periodic_data_saver, daemon=True),
+        threading.Thread(target=snapshot_saver_worker, daemon=True),
         threading.Thread(target=read_PID, daemon=True),
         threading.Thread(target=read_pyrometer, daemon=True),
         threading.Thread(target=read_arduino, daemon=True),
@@ -3809,24 +4248,17 @@ def main():
     show_live_plot_window()
 
     last_plot_refresh_at = 0.0
-    last_data_save_at = 0.0
 
     try:
         while not stop_event.is_set():
             now = time.time()
 
             if now - last_plot_refresh_at >= GUI_REFRESH_INTERVAL_S:
-                snapshot = copy_data_snapshot()
+                snapshot = copy_plot_snapshot()
                 update_live_plot(snapshot)
                 last_plot_refresh_at = now
 
-            if now - last_data_save_at >= DATA_SAVE_INTERVAL_S:
-                snapshot = copy_data_snapshot()
-                write_data_files(snapshot)
-                last_data_save_at = now
-
-            process_pending_snapshots()
-            safe_live_plot_refresh(0.01)
+            safe_live_plot_refresh(0.005)
     except KeyboardInterrupt:
         print('(▀̿Ĺ̯▀̿ ̿) Stop all the threads!!!')
         emergency_keysight_shutdown('KeyboardInterrupt / manual stop')
@@ -3836,6 +4268,7 @@ def main():
         raise
     finally:
         stop_event.set()
+        snapshot_worker_stop_event.set()
         process_pending_snapshots()
 
     for thread in threads:
@@ -3873,9 +4306,9 @@ def main():
     fax_rate_sample.set_title('Sample QMB Rate'); fax_rate_sample.set_xlabel(''); fax_rate_sample.set_ylabel('Rate (Å/s)'); fax_rate_sample.tick_params(axis='x', rotation=30)
     fax_pressure_xgs600.plot(data['XGS600 HFIG pressure']['pressure_times'], data['XGS600 HFIG pressure']['pressure_data'], '-o', color='blue', markersize=4)
     fax_pressure_xgs600.set_title('XGS600 HFIG Pressure'); fax_pressure_xgs600.set_xlabel(''); fax_pressure_xgs600.set_ylabel('Pressure (mbar)'); fax_pressure_xgs600.tick_params(axis='x', rotation=30)
-    fax_temperature_oven.plot(data['Oven PID temperature']['temperature_times'], data['Oven PID temperature']['temperature_data'], '-', color='magenta', linewidth=1.7, label='Oven PID')
-    fax_temperature_oven.plot(data['IMPAC pyrometer']['temperature_times'], data['IMPAC pyrometer']['temperature_data'], '-', color='deepskyblue', linewidth=1.7, label='Pyrometer raw')
-    fax_temperature_oven.plot(data['IMPAC pyrometer']['temperature_times'], data['IMPAC pyrometer']['sample_temperature_data'], '-', color='darkorange', linewidth=1.7, label='Sample estimate')
+    fax_temperature_oven.plot(data['Oven PID temperature']['temperature_times'], data['Oven PID temperature']['temperature_data'], '-', color=TEMPERATURE_VIEW_STYLES['oven']['accent'], linewidth=1.7, label='Oven PID')
+    fax_temperature_oven.plot(data['IMPAC pyrometer']['temperature_times'], data['IMPAC pyrometer']['temperature_data'], '-', color=TEMPERATURE_VIEW_STYLES['pyrometer']['accent'], linewidth=1.7, label='Pyrometer raw')
+    fax_temperature_oven.plot(data['IMPAC pyrometer']['temperature_times'], data['IMPAC pyrometer']['sample_temperature_data'], '-', color=TEMPERATURE_VIEW_STYLES['sample']['accent'], linewidth=1.7, label='Sample estimate')
     fax_temperature_oven.set_title('Temperature Comparison'); fax_temperature_oven.set_xlabel(''); fax_temperature_oven.set_ylabel('Temperature (ºC)'); fax_temperature_oven.tick_params(axis='x', rotation=30); fax_temperature_oven.legend(loc='best', fontsize=8)
     fax_current_keysight.plot(data['Keysight power supply']['current_times'], data['Keysight power supply']['current_data'], '-o', color='goldenrod', markersize=4)
     fax_current_keysight.set_title('Keysight Power Supply Current'); fax_current_keysight.set_xlabel('Time'); fax_current_keysight.set_ylabel('Current (A)'); fax_current_keysight.tick_params(axis='x', rotation=30)
