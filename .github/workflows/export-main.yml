@@ -1,0 +1,30 @@
+name: Export current main
+
+on:
+  push:
+    branches:
+      - agent/release-v0.9.36-r15
+    paths:
+      - '.github/export-main.trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Pack main source
+        shell: bash
+        run: |
+          tar --exclude=.git -cJf /tmp/npg-main.tar.xz .
+      - name: Upload main source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npg-main-source
+          path: /tmp/npg-main.tar.xz
+          if-no-files-found: error
