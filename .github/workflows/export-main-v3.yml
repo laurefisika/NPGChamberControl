@@ -1,0 +1,42 @@
+name: Export current main v3
+
+on:
+  push:
+    branches:
+      - agent/release-v0.9.36-r15
+    paths:
+      - '.github/export-main-v3.trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main source
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-src
+      - name: Pack main source
+        shell: bash
+        run: |
+          tar --exclude=.git -cJf /tmp/npg-main.tar.xz -C main-src .
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/release-v0.9.36-r15
+          path: release-branch
+      - name: Commit temporary main archive to release branch
+        shell: bash
+        working-directory: release-branch
+        run: |
+          mkdir -p .github/tmp-transfer
+          cp /tmp/npg-main.tar.xz .github/tmp-transfer/npg-main.tar.xz
+          sha256sum .github/tmp-transfer/npg-main.tar.xz > .github/tmp-transfer/npg-main.tar.xz.sha256
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/tmp-transfer/npg-main.tar.xz .github/tmp-transfer/npg-main.tar.xz.sha256
+          git commit -m 'Stage temporary main archive for v0.9.36 delta'
+          git push
