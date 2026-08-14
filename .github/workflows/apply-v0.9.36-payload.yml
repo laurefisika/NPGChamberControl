@@ -1,0 +1,55 @@
+name: Apply v0.9.36 payload
+
+on:
+  push:
+    branches:
+      - agent/update-v0.9.36
+    paths:
+      - '.github/update_payload/**'
+      - '.github/workflows/apply-v0.9.36-payload.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply verified v0.9.36 package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f .github/update_payload/READY ]; then
+            echo 'Payload is still being staged; nothing to apply yet.'
+            exit 0
+          fi
+          cat .github/update_payload/chunk_* > /tmp/npg_v0936.b64
+          base64 --decode /tmp/npg_v0936.b64 > /tmp/npg_v0936.zip
+          echo '740606cf73096605ac6c59241fc54f23c8bbd7535226c718a01222e135c62361  /tmp/npg_v0936.zip' | sha256sum -c -
+          rm -rf /tmp/npg_v0936
+          mkdir -p /tmp/npg_v0936
+          unzip -q /tmp/npg_v0936.zip -d /tmp/npg_v0936
+          src=/tmp/npg_v0936/npg_chamber_project_v17
+          test -d "$src/npg_chamber"
+          test -f "$src/pyproject.toml"
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          src = Path('/tmp/npg_v0936/npg_chamber_project_v17/npg_chamber/__init__.py').read_text(encoding='utf-8')
+          assert '__version__ = "0.9.36"' in src, src
+          PY
+          rsync -a "$src/" ./
+          rm -rf README.md SECURITY.md RATE_PID_VALIDATION.md docs original_scripts_backup migration_backups installation_notes TEST_REPORT.md
+          rm -rf .github/update_payload
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Release v0.9.36 (2026.08.11-r15)'
+          git push origin HEAD:agent/update-v0.9.36
