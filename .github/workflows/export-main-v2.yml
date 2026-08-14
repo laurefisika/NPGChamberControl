@@ -1,0 +1,47 @@
+name: Export current main v2
+
+on:
+  push:
+    branches:
+      - agent/release-v0.9.36-r15
+    paths:
+      - '.github/export-main-v2.trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main source
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-src
+      - name: Pack main source
+        shell: bash
+        run: |
+          tar --exclude=.git -cJf /tmp/npg-main.tar.xz -C main-src .
+      - name: Upload main source artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: npg-main-source-v2
+          path: /tmp/npg-main.tar.xz
+          if-no-files-found: error
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/release-v0.9.36-r15
+          path: release-branch
+      - name: Record artifact id
+        shell: bash
+        working-directory: release-branch
+        run: |
+          echo '${{ steps.upload.outputs.artifact-id }}' > .github/export-main-artifact-id
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/export-main-artifact-id
+          git commit -m 'Record temporary main export artifact id'
+          git push
