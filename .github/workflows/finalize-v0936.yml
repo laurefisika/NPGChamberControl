@@ -1,0 +1,76 @@
+name: Finalize v0.9.36 only when verified
+
+on:
+  push:
+    branches:
+      - agent/update-v0.9.36
+    paths:
+      - .github/workflows/finalize-v0936.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require complete v0.9.36 branch
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q '__version__ = "0.9.36"' npg_chamber/__init__.py; then
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -d .github/update_payload ] || [ -d .github/v0936_exact ] || [ -d .github/v0936_raw ]; then
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
+
+      - name: Run complete tests
+        if: steps.gate.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pytest -q
+
+      - name: Remove finalizer and commit cleanup
+        if: steps.gate.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/finalize-v0936.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'Remove v0.9.36 release finalizer'
+            git push origin HEAD:agent/update-v0.9.36
+          fi
+
+      - name: Open and squash-merge release PR
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head agent/update-v0.9.36 --base main --state open --json number --jq '.[0].number // empty')
+          if [ -z "$existing" ]; then
+            gh pr create --repo "$GITHUB_REPOSITORY" \
+              --base main --head agent/update-v0.9.36 \
+              --title 'Release v0.9.36 (2026.08.11-r15)' \
+              --body 'Exact v0.9.36 source package (2026.08.11-r15), transferred with archive SHA-256 verification and full pytest validation.'
+            existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head agent/update-v0.9.36 --base main --state open --json number --jq '.[0].number')
+          fi
+          gh pr merge "$existing" --repo "$GITHUB_REPOSITORY" --squash --delete-branch=false
