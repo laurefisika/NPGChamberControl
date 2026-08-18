@@ -169,8 +169,8 @@ def test_phase2_uses_run_only_coscon_target_fields_everywhere() -> None:
     assert "self.cfg.coscon_emission_a" in text
     assert "ValidateOperateTarget Emission={emission_a:.6e}" in text
     assert "SwitchToOperate Emission={emission_a:.6e}" in text
-    assert "COSCON energy target: {cfg.coscon_energy_v:.1f} V" in text
-    assert "COSCON emission target: {cfg.coscon_emission_a * 1000:.3f} mA" in text
+    assert 'print("\nCurrent configuration:")' not in text
+    assert "format_override_summary" not in text
 
 
 
@@ -218,3 +218,20 @@ def test_phase2_supports_explicit_continuation_without_initial_degas() -> None:
     assert "skipping Degas was not explicitly confirmed" in text
     assert '"start_without_degassing": self.cfg.start_without_degassing' in text
     assert "Skipped by launcher setting for this continuation run" in text
+
+
+def test_phase2_skip_degas_remains_fully_automatic_from_off() -> None:
+    text = PHASE2_PATH.read_text(encoding="utf-8")
+    assert 'return {"off", "standby"}' in text
+    assert 'self._safe_coscon_modes_before_operate(cycle)' in text
+    assert 'SwitchToOperate Emission=' in text
+    assert 'Standby selected' not in text
+    assert 'local COSCON' not in text
+    assert 'COSCON must remain in Standby during pressure conditioning' not in text
+
+
+def test_phase2_waits_for_verified_pywebview_backend() -> None:
+    text = PHASE2_PATH.read_text(encoding="utf-8")
+    assert 'ready_event.wait(timeout=0.10)' in text
+    assert 'webview.start(mark_ready, debug=False)' in text
+    assert 'Windows backend was verified' in text

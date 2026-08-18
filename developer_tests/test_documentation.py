@@ -24,18 +24,16 @@ def test_unified_readme_exists_and_is_useful():
         assert term in text
 
 
-def test_repository_and_operator_documents_have_distinct_roles():
-    # The release package has one operator SOP. The GitHub repository also keeps
-    # a concise project landing page and technical documentation for traceability.
-    repository_readme = Path("README.md")
-    docs = Path("docs")
-    assert repository_readme.is_file()
-    assert "private technical archive" in repository_readme.read_text(encoding="utf-8")
-    assert docs.is_dir()
-    assert (docs / "SAFETY_AND_VALIDATION.md").is_file()
-
-    for path in [Path("installation_notes"), Path("TEST_REPORT.md")]:
-        assert not path.exists(), f"Obsolete duplicate documentation should not exist: {path}"
+def test_no_duplicated_markdown_documentation_files():
+    # User-facing instructions are intentionally consolidated into one SOP.
+    removed_duplicate_paths = [
+        Path("README.md"),
+        Path("docs"),
+        Path("installation_notes"),
+        Path("TEST_REPORT.md"),
+    ]
+    for path in removed_duplicate_paths:
+        assert not path.exists(), f"Duplicated documentation should not exist: {path}"
 
 
 def test_useful_support_documents_are_kept():
@@ -45,16 +43,10 @@ def test_useful_support_documents_are_kept():
         assert p.read_text(encoding="utf-8").strip(), path
 
 
-def test_original_script_backup_is_kept_and_documented():
-    backup = Path("original_scripts_backup")
-    assert backup.is_dir()
-    assert len(list(backup.glob("*.py"))) == 4
-
-    readme_text = Path("READ ME.md").read_text(encoding="utf-8")
-    changelog_text = Path("CHANGELOG.md").read_text(encoding="utf-8")
-    assert "original_scripts_backup/" in readme_text
-    assert "recovery/reference" in readme_text
-    assert "Original-script backup preservation" in changelog_text
+def test_distribution_does_not_ship_internal_change_note_markdown():
+    allowed = {"CHANGELOG.md", "LICENSE.md", "READ ME.md"}
+    root_markdown = {path.name for path in Path(".").glob("*.md")}
+    assert root_markdown == allowed
 
 
 def test_dead_helper_modules_remain_removed():
@@ -65,3 +57,15 @@ def test_dead_helper_modules_remain_removed():
     ]
     for path in removed_paths:
         assert not path.exists(), f"Unused helper should not exist: {path}"
+
+
+def test_release_metadata_matches_v17_9_publication() -> None:
+    citation = Path("CITATION.cff").read_text(encoding="utf-8")
+    changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+    manifest = Path("MANIFEST.in").read_text(encoding="utf-8")
+
+    assert "version: 0.9.36" in citation
+    assert "date-released: 2026-08-11" in citation
+    assert "Repository publication correction · 2026-08-18" in changelog
+    assert "include READ?ME.md" in manifest
+    assert "include READ ME.md" not in manifest

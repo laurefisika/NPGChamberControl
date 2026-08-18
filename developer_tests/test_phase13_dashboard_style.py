@@ -71,13 +71,17 @@ def test_phase_01_and_03_keep_distinct_workflows_and_completion_controls():
     assert "if phase != 'WAIT_SHUTTER_CLOSE':" in phase_03
     assert "leave the Keysight ON at base current for Phase 04" in phase_03
 
-    # Phase 03 GUI abort lowers the oven PID target before the independent
-    # Keysight ramp-down/OFF sequence. Normal Finish phase does not do this.
+    # Abort and Finish have deliberately different hardware semantics.
+    # Abort removes evaporator power first; the oven reset is best-effort only
+    # after the Keysight is already OFF. Finish never sends the oven to 0 °C and
+    # uses the established 0.640 A / OUTPUT ON handoff for Phase 04.
     abort_start = phase_03.index("def request_gui_abort")
     finish_start = phase_03.index("def request_gui_finish")
     abort_source = phase_03[abort_start:finish_start]
+    assert "emergency_keysight_shutdown('GUI Abort button - immediate phase stop')" in abort_source
     assert "set_oven_pid_setpoint(0.0)" in abort_source
-    assert abort_source.index("set_oven_pid_setpoint(0.0)") < abort_source.index("rampdown_keysight_output")
+    assert abort_source.index("emergency_keysight_shutdown") < abort_source.index("set_oven_pid_setpoint(0.0)")
+    assert "rampdown_keysight_output" not in abort_source
     finish_source = phase_03[finish_start:phase_03.index("def _gui_open_shutter", finish_start)]
     assert "set_oven_pid_setpoint(0.0)" not in finish_source
 

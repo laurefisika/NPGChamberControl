@@ -1,77 +1,162 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 
 title NPG Chamber Controller
 cd /d "%~dp0"
+
+set "VENV_PY=.venv\Scripts\python.exe"
+set "SOURCE_BUILD=2026.08.11-r15"
 
 echo.
 echo ============================================================
 echo  NPG Chamber Controller
 echo ============================================================
 echo Project folder: %CD%
+echo Source build: %SOURCE_BUILD%
 echo.
 
-if not exist "pyproject.toml" (
-    echo ERROR: pyproject.toml was not found.
-    echo This file must stay in the root folder of the project.
-    echo.
-    pause
-    exit /b 1
+if not exist "pyproject.toml" goto project_error
+
+rem ---------------------------------------------------------------------------
+rem Fast path: verify package availability without initializing phase-specific GUI backends.
+rem ---------------------------------------------------------------------------
+if exist "%VENV_PY%" (
+    "%VENV_PY%" -c "import sys" >nul 2>&1
+    if not errorlevel 1 goto check_dependencies
+    echo Existing .venv cannot start and will be rebuilt.
+    rmdir /s /q ".venv"
+    if exist ".venv" goto remove_error
 )
 
-if not exist ".venv\Scripts\python.exe" (
-    echo Creating local virtual environment in .venv ...
-    py -3 -m venv .venv
-    if errorlevel 1 (
-        python -m venv .venv
-    )
-    if errorlevel 1 (
-        echo.
-        echo ERROR: Could not create the virtual environment.
-        echo Make sure Python is installed and available from CMD.
-        echo.
-        pause
-        exit /b 1
-    )
-)
+goto create_runtime
 
-set "PYTHON=.venv\Scripts\python.exe"
+:check_dependencies
+echo Checking local runtime ...
+"%VENV_PY%" -c "import importlib.util as u; mods=('serial','matplotlib','requests','webview','clr','PySide6','pyqtgraph'); missing=[m for m in mods if u.find_spec(m) is None]; raise SystemExit(1 if missing else 0)" >nul 2>&1
+if errorlevel 1 goto repair_dependencies
 
-echo Checking package installation ...
-"%PYTHON%" -m pip show npg-chamber >nul 2>&1
-if errorlevel 1 (
-    echo First-time setup: installing package and dependencies ...
-    "%PYTHON%" -m pip install --upgrade pip
-    if errorlevel 1 goto install_error
-    "%PYTHON%" -m pip install -e .
-    if errorlevel 1 goto install_error
-) else (
-    echo Runtime already installed. Using the current project source tree ...
-    rem The command is launched from this folder, so Python loads the current
-    rem npg_chamber source before any older editable-link metadata in .venv.
-    rem Avoiding a redundant pip rebuild also prevents cache/disk-space failures.
-)
+goto check_project_link
 
-echo.
+:check_project_link
+"%VENV_PY%" -c "import pathlib; root=pathlib.Path.cwd().resolve(); import npg_chamber; package=pathlib.Path(npg_chamber.__file__).resolve(); raise SystemExit(0 if root==package.parents[1] else 1)" >nul 2>&1
+if errorlevel 1 goto repair_project_link
+
+goto verify_source
+
+:repair_project_link
+echo Repairing the local project link ...
+"%VENV_PY%" -m pip install --disable-pip-version-check --no-cache-dir --no-deps -e .
+if errorlevel 1 goto install_error
+goto check_runtime
+
+:repair_dependencies
+echo Repairing missing local dependencies ...
+"%VENV_PY%" -m pip install --disable-pip-version-check --no-cache-dir -e .
+if errorlevel 1 goto install_error
+goto check_runtime
+
+:create_runtime
+where python >nul 2>&1
+if errorlevel 1 goto python_error
+
+echo Preparing the local runtime for first use ...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=Get-Item -LiteralPath '%CD%'; $free=$d.PSDrive.Free; if($free -lt 734003200){Write-Host ('ERROR: Less than 700 MB is free on drive '+$d.PSDrive.Name+'. Free disk space before creating .venv.'); exit 9}"
+if errorlevel 1 goto disk_error
+
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>&1
+if errorlevel 1 goto python_version_error
+
+python -m venv .venv
+if errorlevel 1 goto venv_error
+
+echo Installing NPG Chamber dependencies once ...
+"%VENV_PY%" -m pip install --disable-pip-version-check --no-cache-dir -e .
+if errorlevel 1 goto install_error
+
+goto check_runtime
+
+:check_runtime
+"%VENV_PY%" -c "import pathlib, importlib.util as u; root=pathlib.Path.cwd().resolve(); import npg_chamber; package=pathlib.Path(npg_chamber.__file__).resolve(); mods=('serial','matplotlib','requests','webview','clr','PySide6','pyqtgraph'); missing=[m for m in mods if u.find_spec(m) is None]; raise SystemExit(0 if root==package.parents[1] and not missing else 1)" >nul 2>&1
+if errorlevel 1 goto runtime_error
+
+goto verify_source
+
+
+:verify_source
+echo Verifying active source files ...
+"%VENV_PY%" -m npg_chamber.installation_check --expected-build "%SOURCE_BUILD%"
+if errorlevel 1 goto source_mismatch
+
+:launch
+echo Runtime ready.
 echo Starting graphical launcher ...
 echo.
-"%PYTHON%" -m npg_chamber
+"%VENV_PY%" -m npg_chamber
 set "EXITCODE=%ERRORLEVEL%"
-
-echo.
 if not "%EXITCODE%"=="0" (
-    echo The launcher exited with code %EXITCODE%.
     echo.
+    echo The launcher exited with code %EXITCODE%.
     pause
 )
 exit /b %EXITCODE%
 
+:source_mismatch
+echo.
+echo ERROR: The source files do not match build %SOURCE_BUILD%.
+echo The detailed [FAIL] line above identifies the component that does not match.
+echo If this is a mixed/old folder, extract the complete build into a clean folder or overwrite all files.
+echo Current project: %CD%
+pause
+exit /b 1
+
+:project_error
+echo ERROR: pyproject.toml was not found in the project root.
+pause
+exit /b 1
+
+:python_error
+echo ERROR: Windows cannot find the "python" command.
+echo Install or expose Python on PATH, then run this launcher again.
+pause
+exit /b 1
+
+:python_version_error
+echo ERROR: Python 3.10 or newer is required.
+pause
+exit /b 1
+
+:disk_error
+echo.
+echo Runtime setup stopped because the project drive has too little free space.
+echo Free at least 700 MB and run START_NPG_CHAMBER.bat again.
+pause
+exit /b 1
+
+:remove_error
+echo.
+echo ERROR: Could not remove the unusable local .venv.
+echo Close all NPG Chamber and Python windows, then try again.
+pause
+exit /b 1
+
+:venv_error
+echo.
+echo ERROR: Could not create the local virtual environment with "python -m venv".
+pause
+exit /b 1
+
 :install_error
 echo.
-echo ERROR: Installation/update failed.
-echo Check the messages above. You can also try manually:
-echo     .venv\Scripts\activate
-echo     python -m pip install -e .
+echo ERROR: Local runtime installation/repair failed.
+echo Check disk space and internet access, then run this launcher again.
+pause
+exit /b 1
+
+:runtime_error
 echo.
+echo ERROR: The local runtime could not be verified after repair.
+echo The launcher checks package availability only; it does not initialize WinForms/.NET here.
+if exist "%VENV_PY%" "%VENV_PY%" -c "import importlib.util as u; mods=('serial','matplotlib','requests','webview','clr','PySide6','pyqtgraph'); missing=[m for m in mods if u.find_spec(m) is None]; print('Missing Python modules: ' + (', '.join(missing) if missing else 'none detected'))" 2>nul
+echo Check the detailed pip output above. Deleting .venv is not normally required.
 pause
 exit /b 1

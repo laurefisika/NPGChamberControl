@@ -79,3 +79,19 @@ def test_legacy_phase4_final_target_is_migrated(tmp_path: Path, monkeypatch) -> 
     loaded = automation_modes.load_automation_modes()["Legacy"]
     assert "FINAL_VENT_TARGET_C" not in loaded["phases"]["anneal"]
     assert loaded["phases"]["anneal"]["COOLDOWN_TARGET_C"] == 0.0
+
+
+def test_legacy_phase1_ratio_reference_fields_are_migrated(tmp_path: Path, monkeypatch) -> None:
+    store = tmp_path / "automation_modes.json"
+    monkeypatch.setattr(automation_modes, "mode_store_path", lambda: store)
+
+    legacy = _mode("Older calibration recipe")
+    legacy["phases"]["heat"]["CALIBRATION_REFERENCE_RATIO"] = 100.0
+    legacy["phases"]["heat"]["CALIBRATION_RATIO_TOLERANCE_PERCENT"] = 5.0
+    store.write_text(
+        __import__("json").dumps({"version": 4, "modes": {"Legacy": legacy}}),
+        encoding="utf-8",
+    )
+
+    loaded = automation_modes.load_automation_modes()["Legacy"]
+    assert len([key for key in loaded["phases"]["heat"] if key.startswith("CALIBRATION_")]) == 2

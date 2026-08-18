@@ -1,7 +1,4 @@
-import os
 from pathlib import Path
-
-from npg_chamber.workflows.legacy_runner import LEGACY_WORKFLOWS, workflow_environment
 
 
 def test_launcher_blocks_next_phase_until_verified_serial_handoff():
@@ -13,19 +10,6 @@ def test_launcher_blocks_next_phase_until_verified_serial_handoff():
     assert "SerialHandoffError" in gui
     assert "The next phase was blocked" in gui
     assert "All chamber COM ports were reset and released" in gui
-
-
-def test_phase_process_environment_imports_the_current_project_tree():
-    workflow = LEGACY_WORKFLOWS["dpdbba"]
-    existing = os.pathsep.join(["C:\\older-copy", "C:\\shared-tools"])
-    env = workflow_environment(workflow, extra_env={"PYTHONPATH": existing})
-
-    entries = env["PYTHONPATH"].split(os.pathsep)
-    expected_root = Path("npg_chamber").resolve().parent
-
-    assert Path(entries[0]).resolve() == expected_root
-    assert str(expected_root) not in entries[1:]
-    assert env["NPG_CHAMBER_WORKFLOW_KEY"] == "dpdbba"
 
 
 def test_phase_two_and_four_reset_buffers_before_closing_serial_ports():

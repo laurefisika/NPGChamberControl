@@ -36,6 +36,7 @@ import queue
 import re
 import socket
 import time
+import traceback
 
 
 def _resolve_phase_data_parent(phase_folder_name: str) -> str:
@@ -77,7 +78,6 @@ from npg_chamber.common.pressure_alarm import PressureEmergencyAlarm
 
 from npg_chamber.config.run_parameters import (
     apply_overrides_to_object,
-    format_override_summary,
     load_phase_overrides,
     write_effective_parameters,
 )
@@ -135,6 +135,8 @@ class RunConfig:
     degas_timeout_minutes: int = 25
     standby_conditioning_s: int = 60
     operate_transition_timeout_s: int = 35
+    coscon_activation_overload_retries: int = 1
+    coscon_activation_recovery_wait_s: float = 8.0
     coscon_energy_v: float = 2250.0
     coscon_emission_a: float = 0.010
     coscon_energy_tolerance_v: float = 50.0
@@ -166,6 +168,8 @@ class RunConfig:
     monitor_period_s: float = 2.0
     temperature_reach_tolerance_c: float = 5.0
     stable_temperature_reads: int = 3
+    temperature_stable_duration_s: float = 30.0
+    pause_hold_outside_temperature_band: bool = True
 
     # Abort behaviour
     try_reset_pid_on_abort: bool = True
@@ -779,12 +783,12 @@ HTML_TEMPLATE = r"""
   <title>Automated Sputtering-Annealing</title>
   <style>
     :root {
-      --bg:#f4f7fb;
+      --bg:#eef2f7;
       --surface:#ffffff;
       --surface-soft:#f8fafc;
-      --border:#d9e3ee;
-      --text:#22364c;
-      --muted:#697d93;
+      --border:#dbe3ec;
+      --text:#0f172a;
+      --muted:#64748b;
       --accent:#4f82df;
       --accent-dark:#2f65bd;
       --accent-soft:#eaf2ff;
@@ -1108,7 +1112,7 @@ HTML_TEMPLATE = r"""
                 Keep the COSCON webpage and SpecsLab/Prodigy closed while Phase 02 is active.<br><br>
                 Degas is automated unless <b>Start without initial Degas</b> was selected in the launcher. Target validation, Operate, output qualification, sputtering timing and return to Standby are automated. The leak valve remains manual.<br><br>
                 Only skip Degas when continuing the same chamber preparation after an earlier partial Phase 02 run and the operator has verified that another Degas is not required.<br><br>
-                Supervise the first complete three-cycle runs and keep local COSCON controls accessible.
+                Supervise the first complete three-cycle runs and keep the hardware emergency stop accessible.
               </div>
             </div>
           </details>
@@ -1128,11 +1132,11 @@ HTML_TEMPLATE = r"""
   const WORKFLOW_STEPS = [
     {key:'DEGASSING', name:'COSCON Degas', desc:'Automatic in cycle 1; completion detected from Standby', time:'device controlled'},
     {key:'OPEN_VALVE', name:'Open argon valve', desc:'Operator confirmation', time:'manual'},
-    {key:'PRESSURE_CONDITIONING', name:'Pressure stabilization', desc:'COSCON remains in Standby', time:'60 s'},
+    {key:'PRESSURE_CONDITIONING', name:'Pressure stabilization', desc:'COSCON remains safely inactive', time:'60 s'},
     {key:'COSCON_ACTIVATION', name:'COSCON activation', desc:'Validate + Operate + output verification', time:'~10–35 s'},
     {key:'SPUTTERING', name:'Sputtering', desc:'Continuous output and pressure checks', time:'recipe timer'},
     {key:'COSCON_STANDBY', name:'Return to Standby', desc:'Automatic safe-state verification', time:'≤25 s'},
-    {key:'CLOSE_VALVE', name:'Close argon valve', desc:'After automatic Standby', time:'manual'},
+    {key:'CLOSE_VALVE', name:'Close argon valve', desc:'After automatic safe-state return', time:'manual'},
     {key:'ANNEAL_RAMP', name:'Oven ramp', desc:'Wait for target temperature', time:'variable'},
     {key:'ANNEAL_HOLD', name:'Anneal hold', desc:'Timed hold at target', time:'recipe timer'},
     {key:'ANNEAL_RESET', name:'PID reset', desc:'Automatic cycle handoff', time:'automatic'}
@@ -1435,18 +1439,40 @@ class UnifiedUIApi:
         return out
 
 
-def _unified_ui_target(command_q: mp.Queue, event_q: mp.Queue, title: str, width: int, height: int) -> None:
-    import webview
-    api = UnifiedUIApi(command_q, event_q)
-    webview.create_window(
-        title,
-        html=HTML_TEMPLATE,
-        js_api=api,
-        width=width,
-        height=height,
-        confirm_close=True,
-    )
-    webview.start(debug=False)
+def _unified_ui_target(
+    command_q: mp.Queue,
+    event_q: mp.Queue,
+    ready_event: mp.Event,
+    startup_q: mp.Queue,
+    title: str,
+    width: int,
+    height: int,
+) -> None:
+    try:
+        import webview
+        api = UnifiedUIApi(command_q, event_q)
+        webview.create_window(
+            title,
+            html=HTML_TEMPLATE,
+            js_api=api,
+            width=width,
+            height=height,
+            confirm_close=True,
+        )
+
+        def mark_ready() -> None:
+            ready_event.set()
+
+        # The callback runs only after pywebview has successfully selected and
+        # initialized its Windows backend. This prevents the parent process from
+        # entering PREFLIGHT when pythonnet/WinForms has already crashed.
+        webview.start(mark_ready, debug=False)
+    except BaseException:
+        try:
+            startup_q.put(traceback.format_exc())
+        except Exception:
+            pass
+        raise
 
 
 class UnifiedUIClient:
@@ -1458,6 +1484,9 @@ class UnifiedUIClient:
         self.process: Optional[mp.Process] = None
         self.command_q: Optional[mp.Queue] = None
         self.event_q: Optional[mp.Queue] = None
+        self.ready_event: Optional[mp.Event] = None
+        self.startup_q: Optional[mp.Queue] = None
+        self.last_startup_error: str = ""
         self.special_token_handler: Optional[Callable[[str], bool]] = None
 
     def start(self) -> bool:
@@ -1471,13 +1500,38 @@ class UnifiedUIClient:
             return True
         self.command_q = mp.Queue()
         self.event_q = mp.Queue()
+        self.ready_event = mp.Event()
+        self.startup_q = mp.Queue()
+        self.last_startup_error = ""
         self.process = mp.Process(
             target=_unified_ui_target,
-            args=(self.command_q, self.event_q, self.title, self.width, self.height),
+            args=(
+                self.command_q,
+                self.event_q,
+                self.ready_event,
+                self.startup_q,
+                self.title,
+                self.width,
+                self.height,
+            ),
             daemon=True,
         )
         self.process.start()
-        return True
+
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            if self.ready_event.wait(timeout=0.10):
+                return True
+            if not self.process.is_alive():
+                break
+
+        if self.startup_q is not None:
+            try:
+                self.last_startup_error = self.startup_q.get_nowait().strip()
+            except queue.Empty:
+                pass
+        self.close()
+        return False
 
     def is_running(self) -> bool:
         return self.process is not None and self.process.is_alive() and self.command_q is not None and self.event_q is not None
@@ -1569,7 +1623,6 @@ class SputterAnnealController:
                 "sputter",
                 RUN_AUTOMATION_OVERRIDES,
             )
-            info(f"Saved effective automation parameters: {parameter_record_path}")
         except Exception as exc:
             warn(f"Could not save effective automation parameters: {exc}")
 
@@ -1648,7 +1701,7 @@ class SputterAnnealController:
             "PREFLIGHT": ("Preflight checks", "Confirm the physical sputter-gun and electronics preparation."),
             "DEGASSING": ("Automatic COSCON Degas", "Cycle 1 only. The script waits for natural Standby completion."),
             "OPEN_VALVE": ("Open the argon leak valve", "Manual action: stabilize pressure near 2×10⁻⁵ mbar."),
-            "PRESSURE_CONDITIONING": ("Pressure conditioning", "COSCON remains in Standby while pressure stability is verified."),
+            "PRESSURE_CONDITIONING": ("Pressure conditioning", "COSCON remains safely inactive while pressure stability is verified."),
             "COSCON_ACTIVATION": ("COSCON activation", "Validate target, enter Operating and qualify measured energy/emission."),
             "SPUTTERING": ("Sputtering in progress", "Pressure, mode, interlock, energy and emission are checked continuously."),
             "COSCON_STANDBY": ("Returning COSCON to Standby", "The sputtering output is being disabled and the safe state is verified."),
@@ -1933,11 +1986,16 @@ class SputterAnnealController:
         banner("OPENING UNIFIED INTERFACE")
         ok = self.ui.start()
         if ok:
-            info("Phase 02 control dashboard started.")
+            info("Phase 02 control dashboard started and its Windows backend was verified.")
         else:
-            raise RuntimeError(
-                "Could not start the Phase 02 dashboard. Install pywebview and WebView2 Runtime."
+            details = self.ui.last_startup_error
+            message = (
+                "Could not initialize the Phase 02 dashboard Windows backend. "
+                "The launcher runtime check should normally repair pywebview/pythonnet automatically."
             )
+            if details:
+                message += f"\nDashboard startup traceback:\n{details}"
+            raise RuntimeError(message)
 
     def _require_pressure(self, *, normal_window: bool = True) -> float:
         pressure = self.state.pressure_mbar
@@ -2015,10 +2073,35 @@ class SputterAnnealController:
             time.sleep(1.0)
         raise RuntimeError("Timed out waiting for Degas to finish naturally in Standby.")
 
+    def _safe_coscon_modes_before_operate(self, cycle: int) -> set[str]:
+        # A continuation run can legitimately begin with COSCON Off because the
+        # skipped Degas did not leave it in Standby. Off is an inactive safe
+        # state, and this COSCON firmware accepts SwitchToOperate directly from
+        # Off. Normal and later cycles still require Standby.
+        if cycle == 1 and self.cfg.start_without_degassing:
+            return {"off", "standby"}
+        return {"standby"}
+
     def prompt_open_valve(self, cycle: int) -> None:
         self._set_stage("OPEN_VALVE", cycle)
         banner(f"CYCLE {cycle} - OPEN LEAK VALVE")
-        self._wait_for_token("o", "Open the manual leak valve and stabilize pressure near 2e-5 mbar, then click 'Valve opened'.")
+        allowed_modes = self._safe_coscon_modes_before_operate(cycle)
+        initial_status = self.coscon.status()
+        if initial_status.interlock.lower() != "ok":
+            raise RuntimeError(
+                f"COSCON interlock is not OK before opening the leak valve: {initial_status.raw}"
+            )
+        if initial_status.mode.lower() not in allowed_modes:
+            raise RuntimeError(
+                "COSCON is not in an inactive safe state before opening the leak valve: "
+                f"{initial_status.raw}. Allowed mode(s): {', '.join(sorted(allowed_modes))}."
+            )
+
+        self._wait_for_token(
+            "o",
+            "Open the manual leak valve and stabilize pressure near 2e-5 mbar, "
+            "then click 'Valve opened'.",
+        )
         self._set_stage("PRESSURE_CONDITIONING", cycle)
         total_s = int(self.cfg.standby_conditioning_s)
         deadline = time.time() + total_s
@@ -2031,111 +2114,230 @@ class SputterAnnealController:
                 "Conditioning left",
             )
             status = self.coscon.status()
-            if status.mode.lower()!="standby" or status.interlock.lower()!="ok":
-                raise RuntimeError(f"COSCON must remain in Standby during pressure conditioning: {status.raw}")
+            if status.interlock.lower() != "ok" or status.mode.lower() not in allowed_modes:
+                raise RuntimeError(
+                    "COSCON left its inactive safe state during pressure conditioning: "
+                    f"{status.raw}. Allowed mode(s): {', '.join(sorted(allowed_modes))}."
+                )
             self._require_pressure(normal_window=True)
             time.sleep(1.0)
         self._set_phase_timer(0, total_s, "Conditioning left")
-        info("Pressure and Standby conditioning completed.")
+        info(
+            "Pressure conditioning completed with COSCON safely inactive in "
+            f"{status.mode}."
+        )
+
+    @staticmethod
+    def _is_recoverable_activation_overload(status: CosconStatus) -> bool:
+        """Return True only for the known transient HV energy overload during activation.
+
+        This deliberately does *not* classify arbitrary COSCON errors as recoverable.
+        Interlock must remain OK, and recovery is used only by ``coscon_start_sputter``
+        before stable sputtering has begun.
+        """
+        details = re.sub(r"\s+", " ", (status.details or "").strip().lower())
+        return (
+            status.mode.lower() == "error"
+            and status.interlock.lower() == "ok"
+            and "hv-module energy overload" in details
+        )
+
+    def _recover_activation_overload(
+        self,
+        cycle: int,
+        status: CosconStatus,
+        *,
+        attempt: int,
+        total_attempts: int,
+    ) -> None:
+        note = (
+            "Transient COSCON HV-Module Energy Overload during activation. "
+            f"Automatic recovery {attempt}/{total_attempts - 1}: requesting a verified "
+            "safe state before retrying Operate. "
+            f"COSCON details: {status.details}"
+        )
+        warn(note)
+        self.logger.log_snapshot(self.state.snapshot(), note=note)
+        self._set_phase_timer(None, None, "Recovering COSCON")
+
+        # Never leave the HV active while waiting. Reuse the same verified safe-stop
+        # path used by shutdown, then require a real inactive mode before retrying.
+        self._coscon_safe_stop()
+        safe_status = self.coscon.status()
+        if safe_status.interlock.lower() != "ok":
+            raise RuntimeError(
+                "COSCON interlock is not OK after activation-overload recovery: "
+                f"{safe_status.raw}"
+            )
+        if safe_status.mode.lower() not in {"standby", "off"}:
+            raise RuntimeError(
+                "COSCON could not be verified in a safe inactive state after "
+                f"activation overload: {safe_status.raw}"
+            )
+
+        self.coscon_activation_requested = False
+        wait_s = max(0.0, float(self.cfg.coscon_activation_recovery_wait_s))
+        deadline = time.time() + wait_s
+        self._set_phase_timer(int(math.ceil(wait_s)), int(math.ceil(wait_s)), "Recovery wait")
+        while time.time() < deadline:
+            self._poll_ui_background()
+            remaining = max(0, int(math.ceil(deadline - time.time())))
+            self._set_phase_timer(remaining, int(math.ceil(wait_s)), "Recovery wait")
+            self._require_pressure(normal_window=True)
+            check = self.coscon.status()
+            if check.interlock.lower() != "ok":
+                raise RuntimeError(
+                    "COSCON interlock changed during activation recovery: "
+                    f"{check.raw}"
+                )
+            if check.mode.lower() not in {"standby", "off"}:
+                raise RuntimeError(
+                    "COSCON left its safe inactive state during activation recovery: "
+                    f"{check.raw}"
+                )
+            time.sleep(0.7)
+
+        self._clear_phase_timer("Recovery complete")
+        info(
+            "COSCON activation recovery completed in a verified safe state. "
+            "Re-validating the requested energy/emission before one retry."
+        )
 
     def coscon_start_sputter(self, cycle: int) -> None:
         self._set_stage("COSCON_ACTIVATION", cycle)
         banner(f"CYCLE {cycle} - AUTOMATED COSCON OPERATE")
 
-        status = self.coscon.status()
-        if status.mode.lower() != "standby" or status.interlock.lower() != "ok":
+        initial_status = self.coscon.status()
+        allowed_modes = self._safe_coscon_modes_before_operate(cycle)
+        if initial_status.mode.lower() not in allowed_modes or initial_status.interlock.lower() != "ok":
             raise RuntimeError(
-                f"Activation requires Standby/Interlock Ok: {status.raw}"
+                "Activation requires an inactive safe COSCON mode with Interlock Ok. "
+                f"Allowed mode(s): {', '.join(sorted(allowed_modes))}; received: {initial_status.raw}"
             )
 
-        self._require_pressure(normal_window=True)
-        self.coscon.validate(
-            self.cfg.coscon_emission_a,
-            self.cfg.coscon_energy_v,
-        )
-        self.coscon_activation_requested = True
-        self.coscon.operate(
-            self.cfg.coscon_emission_a,
-            self.cfg.coscon_energy_v,
-        )
+        max_retries = max(0, int(self.cfg.coscon_activation_overload_retries))
+        total_attempts = 1 + max_retries
 
-        total_transition_s = int(self.cfg.operate_transition_timeout_s)
-        deadline = time.time() + total_transition_s
-        self._set_phase_timer(
-            total_transition_s,
-            total_transition_s,
-            "Operate transition",
-        )
+        for activation_attempt in range(1, total_attempts + 1):
+            self._require_pressure(normal_window=True)
+            self.coscon.validate(
+                self.cfg.coscon_emission_a,
+                self.cfg.coscon_energy_v,
+            )
+            self.coscon_activation_requested = True
+            self.coscon.operate(
+                self.cfg.coscon_emission_a,
+                self.cfg.coscon_energy_v,
+            )
 
-        while time.time() < deadline:
-            self._poll_ui_background()
+            total_transition_s = int(self.cfg.operate_transition_timeout_s)
+            deadline = time.time() + total_transition_s
             self._set_phase_timer(
-                max(0, int(deadline - time.time())),
+                total_transition_s,
                 total_transition_s,
                 "Operate transition",
             )
-            status = self.coscon.status()
-            monitor = self.coscon.monitor()
-            self._require_pressure(normal_window=True)
 
-            if status.interlock.lower() != "ok":
-                raise RuntimeError(f"COSCON interlock changed: {status.raw}")
-            if status.mode.lower() == "error":
-                raise RuntimeError(f"COSCON device error: {status.details}")
-            if status.mode.lower() == "operating":
-                break
-            time.sleep(0.7)
-        else:
-            raise RuntimeError("Timeout waiting for COSCON Operating.")
+            recoverable_status = None
+            while time.time() < deadline:
+                self._poll_ui_background()
+                self._set_phase_timer(
+                    max(0, int(deadline - time.time())),
+                    total_transition_s,
+                    "Operate transition",
+                )
+                status = self.coscon.status()
+                monitor = self.coscon.monitor()
+                self._require_pressure(normal_window=True)
 
-        stability_total_s = 20
-        stability_deadline = time.time() + stability_total_s
-        good_samples = 0
-        self._set_phase_timer(
-            stability_total_s,
-            stability_total_s,
-            "Output verification",
-        )
+                if status.interlock.lower() != "ok":
+                    raise RuntimeError(f"COSCON interlock changed: {status.raw}")
+                if status.mode.lower() == "error":
+                    if self._is_recoverable_activation_overload(status):
+                        recoverable_status = status
+                        break
+                    raise RuntimeError(f"COSCON device error: {status.details}")
+                if status.mode.lower() == "operating":
+                    break
+                time.sleep(0.7)
+            else:
+                raise RuntimeError("Timeout waiting for COSCON Operating.")
 
-        while time.time() < stability_deadline:
-            self._poll_ui_background()
-            self._set_phase_timer(
-                max(0, int(stability_deadline - time.time())),
-                stability_total_s,
-                "Output verification",
+            if recoverable_status is None and status.mode.lower() == "operating":
+                stability_total_s = 30
+                stability_deadline = time.time() + stability_total_s
+                good_samples = 0
+                self._set_phase_timer(
+                    stability_total_s,
+                    stability_total_s,
+                    "Output verification",
+                )
+
+                while time.time() < stability_deadline:
+                    self._poll_ui_background()
+                    self._set_phase_timer(
+                        max(0, int(stability_deadline - time.time())),
+                        stability_total_s,
+                        "Output verification",
+                    )
+                    status = self.coscon.status()
+                    monitor = self.coscon.monitor()
+                    self._require_pressure(normal_window=True)
+
+                    if status.interlock.lower() != "ok":
+                        raise RuntimeError(f"COSCON interlock changed: {status.raw}")
+                    if status.mode.lower() == "error":
+                        if self._is_recoverable_activation_overload(status):
+                            recoverable_status = status
+                            break
+                        raise RuntimeError(f"COSCON device error: {status.details}")
+
+                    energy_ok = (
+                        abs(monitor.energy_v - self.cfg.coscon_energy_v)
+                        <= self.cfg.coscon_energy_tolerance_v
+                    )
+                    emission_ok = (
+                        abs(monitor.emission_a - self.cfg.coscon_emission_a)
+                        <= self.cfg.coscon_emission_tolerance_a
+                    )
+                    good_samples = (
+                        good_samples + 1
+                        if status.mode.lower() == "operating" and energy_ok and emission_ok
+                        else 0
+                    )
+
+                    if good_samples >= self.cfg.coscon_stable_samples:
+                        self._clear_phase_timer("Output stable")
+                        info(
+                            "COSCON stable measured output confirmed "
+                            f"on activation attempt {activation_attempt}/{total_attempts}."
+                        )
+                        return
+                    time.sleep(0.7)
+
+                if recoverable_status is None:
+                    raise RuntimeError(
+                        "Operating reached but stable measured energy/emission was not confirmed."
+                    )
+
+            # Only the exact HV energy-overload error is allowed into this branch.
+            # Recover once by default; a repeated overload is treated as a real
+            # hardware/process fault and the normal shutdown path remains active.
+            if activation_attempt >= total_attempts:
+                raise RuntimeError(
+                    "COSCON HV-Module Energy Overload repeated during activation "
+                    f"after {activation_attempt} attempt(s). Last details: "
+                    f"{recoverable_status.details if recoverable_status else 'unknown'}"
+                )
+
+            self._recover_activation_overload(
+                cycle,
+                recoverable_status,
+                attempt=activation_attempt,
+                total_attempts=total_attempts,
             )
-            status = self.coscon.status()
-            monitor = self.coscon.monitor()
-            self._require_pressure(normal_window=True)
 
-            if status.interlock.lower() != "ok":
-                raise RuntimeError(f"COSCON interlock changed: {status.raw}")
-            if status.mode.lower() == "error":
-                raise RuntimeError(f"COSCON device error: {status.details}")
-
-            energy_ok = (
-                abs(monitor.energy_v - self.cfg.coscon_energy_v)
-                <= self.cfg.coscon_energy_tolerance_v
-            )
-            emission_ok = (
-                abs(monitor.emission_a - self.cfg.coscon_emission_a)
-                <= self.cfg.coscon_emission_tolerance_a
-            )
-            good_samples = (
-                good_samples + 1
-                if status.mode.lower() == "operating" and energy_ok and emission_ok
-                else 0
-            )
-
-            if good_samples >= self.cfg.coscon_stable_samples:
-                self._clear_phase_timer("Output stable")
-                info("COSCON stable measured output confirmed.")
-                return
-            time.sleep(0.7)
-
-        raise RuntimeError(
-            "Operating reached but stable measured energy/emission was not confirmed."
-        )
+        raise RuntimeError("COSCON activation ended without a confirmed stable output.")
 
     def run_sputter_timer(self, cycle: int) -> None:
         self._set_stage("SPUTTERING", cycle)
@@ -2266,49 +2468,73 @@ class SputterAnnealController:
     def wait_until_temperature_reached(self, cycle: int, target_c: float) -> None:
         self._set_stage("ANNEAL_RAMP", cycle)
         self._set_phase_timer(None, None, "Ramp target")
-        banner(f"CYCLE {cycle} - WAITING FOR {target_c:.0f} °C")
-        stable_hits = 0
-        while stable_hits < self.cfg.stable_temperature_reads:
+        banner(f"CYCLE {cycle} - WAITING FOR STABLE {target_c:.0f} °C")
+        stable_since = None
+        required_s = max(0.0, float(self.cfg.temperature_stable_duration_s))
+        tolerance = abs(float(self.cfg.temperature_reach_tolerance_c))
+        while True:
             self._poll_ui_background()
             temp = self.state.oven_pv_c
             sv = self.state.oven_sv_c
             if temp is None:
+                stable_since = None
                 warn("PV not available yet. Waiting...")
-                time.sleep(2)
+                time.sleep(self.cfg.monitor_period_s)
                 continue
-            diff = abs(temp - target_c)
-            self._set_phase_timer(None, None, f"Ramp Δ {diff:.1f}°C")
-            print(
-                f"Current oven PV: {temp:.1f} °C | current SV: {fmt_opt(sv, '.1f')} °C | target={target_c:.1f} °C | diff={diff:.1f} °C"
-            )
-            if temp >= (target_c - self.cfg.temperature_reach_tolerance_c):
-                stable_hits += 1
+            diff = abs(float(temp) - float(target_c))
+            inside = diff <= tolerance
+            now_mono = time.monotonic()
+            if inside:
+                if stable_since is None:
+                    stable_since = now_mono
             else:
-                stable_hits = 0
+                stable_since = None
+            stable_elapsed = 0.0 if stable_since is None else now_mono - stable_since
+            self._set_phase_timer(None, None, f"Stable {stable_elapsed:.0f}/{required_s:.0f}s")
+            print(
+                f"Current oven PV: {temp:.1f} °C | current SV: {fmt_opt(sv, '.1f')} °C | "
+                f"target={target_c:.1f} °C | |Δ|={diff:.1f} °C | "
+                f"stable={stable_elapsed:.0f}/{required_s:.0f} s"
+            )
+            if inside and stable_elapsed >= required_s:
+                break
             time.sleep(self.cfg.monitor_period_s)
-        info(f"Oven reached target window near {target_c:.0f} °C.")
+        info(
+            f"Oven remained inside {target_c:.0f} ± {tolerance:.1f} °C "
+            f"for {required_s:.0f} s."
+        )
 
     def anneal_hold(self, cycle: int) -> None:
         self._set_stage("ANNEAL_HOLD", cycle)
-        banner(f"CYCLE {cycle} - ANNEAL HOLD")
-        total_s = int(self.cfg.anneal_hold_minutes * 60)
-        self._set_phase_timer(total_s, total_s, "Anneal left")
-        start = time.time()
-        while True:
+        banner(f"CYCLE {cycle} - EFFECTIVE ANNEAL HOLD")
+        total_s = max(0.0, float(self.cfg.anneal_hold_minutes) * 60.0)
+        tolerance = abs(float(self.cfg.temperature_reach_tolerance_c))
+        target_c = float(self.cfg.anneal_target_c)
+        effective_elapsed = 0.0
+        last_mono = time.monotonic()
+        self._set_phase_timer(int(total_s), int(total_s), "Anneal effective")
+        while effective_elapsed < total_s:
             self._poll_ui_background()
-            elapsed = int(time.time() - start)
-            remaining = total_s - elapsed
-            self._set_phase_timer(remaining, total_s, "Anneal left")
-            if remaining <= 0:
-                break
-            mins, secs = divmod(remaining, 60)
+            now_mono = time.monotonic()
+            dt = max(0.0, now_mono - last_mono)
+            last_mono = now_mono
             snap = self.state.snapshot()
+            pv = snap['oven_pv_c']
+            inside = pv is not None and abs(float(pv) - target_c) <= tolerance
+            if inside or not self.cfg.pause_hold_outside_temperature_band:
+                effective_elapsed += dt
+            remaining = max(0, int(math.ceil(total_s - effective_elapsed)))
+            timer_label = "Anneal effective" if inside else "Anneal paused: PV outside band"
+            self._set_phase_timer(remaining, int(total_s), timer_label)
+            mins, secs = divmod(remaining, 60)
             print(
-                f"Anneal hold countdown: {mins:02d}:{secs:02d} remaining | PV={fmt_opt(snap['oven_pv_c'], '.1f')} °C | SV={fmt_opt(snap['oven_sv_c'], '.1f')} °C"
+                f"Effective anneal: {mins:02d}:{secs:02d} remaining | "
+                f"PV={fmt_opt(pv, '.1f')} °C | SV={fmt_opt(snap['oven_sv_c'], '.1f')} °C | "
+                f"in_band={inside}"
             )
             time.sleep(1)
-        self._set_phase_timer(0, total_s, "Anneal left")
-        info("Anneal hold finished.")
+        self._set_phase_timer(0, int(total_s), "Anneal effective")
+        info("Effective anneal hold finished.")
 
     def reset_pid_after_anneal(self, cycle: int) -> None:
         self._set_stage("ANNEAL_RESET", cycle)
@@ -2477,28 +2703,6 @@ def main() -> None:
     run_name = os.environ.get("NPG_CHAMBER_RUN_NAME", "").strip() or input("Run name [press Enter for default]: ").strip() or "Run"
     cfg = RunConfig(run_name=run_name)
     apply_overrides_to_object("sputter", cfg, RUN_AUTOMATION_OVERRIDES)
-    print("\n" + format_override_summary("sputter", RUN_AUTOMATION_OVERRIDES) + "\n")
-
-    print("\nCurrent configuration:")
-    print(f"  COSCON UDP: {cfg.coscon_ip}:{cfg.coscon_udp_port}")
-    print("  COSCON web interface: not used; keep it closed")
-    print(f"  Cycles: {cfg.cycles}")
-    print(f"  Start without initial Degas: {'YES' if cfg.start_without_degassing else 'no'}")
-    print(f"  Sputter time: {cfg.sputter_minutes} min")
-    print(f"  COSCON energy target: {cfg.coscon_energy_v:.1f} V")
-    print(f"  COSCON emission target: {cfg.coscon_emission_a * 1000:.3f} mA")
-    print(f"  COSCON emission tolerance: ±{cfg.coscon_emission_tolerance_a * 1000:.3f} mA")
-    print(f"  Consecutive bad emission reads before abort: {cfg.coscon_emission_fault_samples}")
-    print(f"  Emission recheck delay: {cfg.coscon_emission_recheck_s:.2f} s")
-    print(f"  Anneal target: {cfg.anneal_target_c:.0f} °C")
-    print(f"  Anneal hold: {cfg.anneal_hold_minutes} min")
-    print(f"  Anneal reset after cycle: {cfg.anneal_reset_c:.0f} °C")
-    print(f"  Abort reset: {cfg.abort_reset_c:.0f} °C")
-    print(f"  PID port/address: {cfg.pid_port} / {cfg.pid_address}")
-    print("  PID serial lock/retries: enabled")
-    print("\nRequirements for the unified UI on Windows:")
-    print("  pip install pyserial colorama pywebview")
-    print("  and make sure Microsoft Edge WebView2 Runtime is installed")
 
     controller = SputterAnnealController(cfg)
     controller.run()

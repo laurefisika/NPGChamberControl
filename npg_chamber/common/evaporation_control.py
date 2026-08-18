@@ -63,7 +63,7 @@ class RatePidConfig:
     max_down_step_a: float
     integral_limit_thickness: float
     min_current_a: float = 0.0
-    max_current_a: float = 0.670
+    max_current_a: float = 0.660
 
 
 @dataclass(frozen=True)
@@ -156,15 +156,20 @@ class RatePidController:
                 abs(self.config.max_up_step_a),
             )
 
-            # Current-bound anti-windup: do not accumulate error that can only
-            # push farther into an already saturated limit.
+            # Complete anti-windup: freeze the integral not only at the
+            # absolute current bounds, but also while the requested correction
+            # is being clipped by the per-action rate limiter.  Otherwise a
+            # thermally delayed plant can store a large hidden integral while
+            # every visible action is already saturated.
             pushing_upper_limit = (
                 current_setpoint_a >= self.config.max_current_a - 1e-12 and delta > 0
             )
             pushing_lower_limit = (
                 current_setpoint_a <= self.config.min_current_a + 1e-12 and delta < 0
             )
-            if not (pushing_upper_limit or pushing_lower_limit):
+            step_limited = not math.isclose(delta, raw_delta, abs_tol=1e-15)
+            limiter_pushes_with_error = step_limited and raw_delta * error > 0
+            if not (pushing_upper_limit or pushing_lower_limit or limiter_pushes_with_error):
                 self.integral_error_thickness = integral_candidate
 
         temperature_limited = False

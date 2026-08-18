@@ -46,8 +46,6 @@ from typing import Optional
 
 from npg_chamber.config.run_parameters import (
     apply_overrides_to_namespace,
-    format_override_summary,
-    format_pyrometer_summary,
     load_phase_overrides,
     load_pyrometer_settings,
     write_effective_parameters,
@@ -58,7 +56,6 @@ RUN_AUTOMATION_OVERRIDES = load_phase_overrides("anneal")
 PYROMETER_SETTINGS = load_pyrometer_settings()
 PYROMETER_PROFILE = PyrometerProfile(**PYROMETER_SETTINGS)
 PYROMETER_SERIAL_CONFIG = PyrometerSerialConfig(port="COM10", baudrate=38400, address="00")
-print("\n" + format_pyrometer_summary(PYROMETER_SETTINGS) + "\n")
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -109,7 +106,11 @@ FIRST_STAGE_HOLD_S = 15 * 60
 
 SECOND_STAGE_TARGET_C = 600.0
 SECOND_STAGE_HOLD_S = 40 * 60
-STAGE_REACHED_MARGIN_C = 1.0
+STAGE_REACHED_MARGIN_C = 2.0
+STAGE_STABLE_DURATION_S = 30.0
+PAUSE_HOLD_OUTSIDE_TEMPERATURE_BAND = True
+OVEN_SIGNAL_STALE_TIMEOUT_S = 10.0
+OVEN_SIGNAL_INITIAL_GRACE_S = 15.0
 
 COOLDOWN_TARGET_C = 0.0
 POST_COOLDOWN_WAIT_S = 10 * 60
@@ -130,7 +131,6 @@ AUTO_CLOSE_WHEN_LAUNCHED_FROM_UNIFIED = os.environ.get("NPG_CHAMBER_UNIFIED_LAUN
 # COM ports and hard Keysight protection values remain fixed and are not included
 # in the editable parameter schema.
 apply_overrides_to_namespace("anneal", globals(), RUN_AUTOMATION_OVERRIDES)
-print("\n" + format_override_summary("anneal", RUN_AUTOMATION_OVERRIDES) + "\n")
 
 
 # =============================================================================
@@ -956,8 +956,32 @@ def latest_ck1_temperature_c(state: SharedState) -> Optional[float]:
         return state.ck1_temperature_values[-1] if state.ck1_temperature_values else None
 
 
+def latest_oven_temperature_age_s(state: SharedState) -> Optional[float]:
+    with state.data_lock:
+        timestamp = state.oven_temperature_times[-1] if state.oven_temperature_times else None
+    if timestamp is None:
+        return None
+    try:
+        return max(0.0, time.time() - timestamp.timestamp())
+    except Exception:
+        return None
+
+
+def require_fresh_oven_signal(state: SharedState, *, allow_initial_grace_s: float = 0.0, started_mono: Optional[float] = None) -> None:
+    age_s = latest_oven_temperature_age_s(state)
+    if age_s is None and started_mono is not None and time.monotonic() - started_mono <= allow_initial_grace_s:
+        return
+    if age_s is None or age_s > OVEN_SIGNAL_STALE_TIMEOUT_S:
+        raise RuntimeError(
+            'Oven PID process-value signal is unavailable or stale '
+            f'(age={age_s if age_s is not None else "unknown"} s; '
+            f'limit={OVEN_SIGNAL_STALE_TIMEOUT_S:.1f} s).'
+        )
+
+
 def stage_reached_threshold(target_c: float) -> float:
-    return float(target_c) - STAGE_REACHED_MARGIN_C
+    """Lower edge retained for display compatibility; readiness is symmetric."""
+    return float(target_c) - abs(float(STAGE_REACHED_MARGIN_C))
 
 
 def wait_until_temperature_reached(
@@ -965,23 +989,42 @@ def wait_until_temperature_reached(
     target_getter,
     label_getter,
 ) -> bool:
-    initial_target = float(target_getter())
+    tolerance = abs(float(STAGE_REACHED_MARGIN_C))
+    required_s = max(0.0, float(STAGE_STABLE_DURATION_S))
     banner(
-        f"Waiting until the oven reaches {label_getter()} "
-        f"({stage_reached_threshold(initial_target):.0f} °C threshold)."
+        f"Waiting until the oven is stable inside {label_getter()} "
+        f"(±{tolerance:.1f} °C for {required_s:.0f} s)."
     )
-    state.set_message(f"Waiting for {label_getter()}")
+    state.set_message(f"Waiting for stable {label_getter()}")
+    stable_since = None
+    last_target = None
 
     while not state.stop_event.is_set():
         target_c = float(target_getter())
-        threshold_c = stage_reached_threshold(target_c)
+        if last_target is None or not math.isclose(target_c, last_target, abs_tol=1e-9):
+            stable_since = None
+            last_target = target_c
         current_temp = latest_oven_temperature_c(state)
+        require_fresh_oven_signal(state)
+        now_mono = time.monotonic()
+        inside = current_temp is not None and abs(float(current_temp) - target_c) <= tolerance
+        if inside:
+            if stable_since is None:
+                stable_since = now_mono
+        else:
+            stable_since = None
+        stable_elapsed = 0.0 if stable_since is None else now_mono - stable_since
         state.set_message(
-            f"Waiting for {label_getter()} | threshold {threshold_c:.1f} °C | "
-            f"oven {current_temp if current_temp is not None else '--'} °C"
+            f"Waiting for {label_getter()} | band {target_c:.1f} ± {tolerance:.1f} °C | "
+            f"oven {current_temp if current_temp is not None else '--'} °C | "
+            f"stable {stable_elapsed:.0f}/{required_s:.0f} s"
         )
-        if current_temp is not None and current_temp >= threshold_c:
-            info(f"Reached {current_temp:.1f} °C >= {threshold_c:.1f} °C", Fore.MAGENTA)
+        if inside and stable_elapsed >= required_s:
+            info(
+                f"Oven stable at {current_temp:.1f} °C inside {target_c:.1f} ± {tolerance:.1f} °C "
+                f"for {required_s:.0f} s.",
+                Fore.MAGENTA,
+            )
             return True
         time.sleep(2.0)
     return False
@@ -989,33 +1032,62 @@ def wait_until_temperature_reached(
 
 def hold_for_seconds(state: SharedState, seconds: float, label: str) -> bool:
     banner(f"{label} for {seconds / 60:.1f} min")
+    duration_s = max(0.0, float(seconds))
+    start_mono = time.monotonic()
     with state.state_lock:
-        state.phase_deadline_at = time.time() + max(0.0, seconds)
+        state.phase_deadline_at = time.time() + duration_s
         state.last_message = label
-    return sleep_interruptibly(seconds, state.stop_event)
+    while not state.stop_event.is_set():
+        require_fresh_oven_signal(
+            state,
+            allow_initial_grace_s=OVEN_SIGNAL_INITIAL_GRACE_S,
+            started_mono=start_mono,
+        )
+        elapsed = time.monotonic() - start_mono
+        if elapsed >= duration_s:
+            return True
+        time.sleep(min(0.25, max(0.05, duration_s - elapsed)))
+    return False
 
 
-def hold_with_live_duration(state: SharedState, duration_getter, label_getter) -> bool:
+def hold_with_live_duration(
+    state: SharedState,
+    duration_getter,
+    label_getter,
+    target_getter=None,
+) -> bool:
     initial_duration_s = max(0.0, float(duration_getter()))
-    banner(f"{label_getter()} for {initial_duration_s / 60:.1f} min")
+    banner(f"{label_getter()} for {initial_duration_s / 60:.1f} effective min")
+    effective_elapsed_s = 0.0
+    last_mono = time.monotonic()
+    tolerance = abs(float(STAGE_REACHED_MARGIN_C))
 
     while not state.stop_event.is_set():
         duration_s = max(0.0, float(duration_getter()))
         label = label_getter()
-        now = time.time()
+        now_mono = time.monotonic()
+        dt = max(0.0, now_mono - last_mono)
+        last_mono = now_mono
+        current_temp = latest_oven_temperature_c(state)
+        require_fresh_oven_signal(state)
+        target_c = float(target_getter()) if target_getter is not None else None
+        inside = (
+            target_c is None
+            or (current_temp is not None and abs(float(current_temp) - target_c) <= tolerance)
+        )
+        if inside or not PAUSE_HOLD_OUTSIDE_TEMPERATURE_BAND:
+            effective_elapsed_s += dt
+        remaining_s = max(0.0, duration_s - effective_elapsed_s)
 
         with state.state_lock:
-            elapsed_s = max(0.0, now - state.phase_started_at)
-            remaining_s = max(0.0, duration_s - elapsed_s)
-            state.phase_deadline_at = state.phase_started_at + duration_s
+            state.phase_deadline_at = time.time() + remaining_s
             state.last_message = (
-                f"{label} | hold {duration_s / 60:.1f} min | "
-                f"remaining {remaining_s / 60:.1f} min"
+                f"{label} | effective hold {duration_s / 60:.1f} min | "
+                f"remaining {remaining_s / 60:.1f} min | in band: {inside}"
             )
 
-        if elapsed_s >= duration_s:
+        if effective_elapsed_s >= duration_s:
             return True
-
         time.sleep(min(0.25, max(0.05, remaining_s)))
 
     return False
@@ -1053,6 +1125,7 @@ def run_annealing_sequence(pid: PIDController, state: SharedState) -> None:
             state,
             state.get_first_stage_hold_s,
             lambda: f"Holding first stage at {state.get_first_stage_target_c():.1f} °C",
+            state.get_first_stage_target_c,
         ):
             return
 
@@ -1076,6 +1149,7 @@ def run_annealing_sequence(pid: PIDController, state: SharedState) -> None:
             state,
             state.get_second_stage_hold_s,
             lambda: f"Holding second stage at {state.get_second_stage_target_c():.1f} °C",
+            state.get_second_stage_target_c,
         ):
             return
 
@@ -1201,8 +1275,10 @@ def phase_timeline_text(state: SharedState) -> str:
 
 
 def build_figure() -> tuple[plt.Figure, dict]:
+    # Match the Phase 01/02/03 typography on the Windows operator station.
+    plt.rcParams["font.family"] = "Segoe UI"
     fig, axes = plt.subplots(2, 2, figsize=(17.2, 9.4))
-    fig.patch.set_facecolor("#f4f6f8")
+    fig.patch.set_facecolor("#eef2f7")
     plt.subplots_adjust(left=0.06, right=0.735, top=0.88, bottom=0.085, hspace=0.34, wspace=0.27)
 
     ax_oven = axes[0, 0]
@@ -1210,14 +1286,14 @@ def build_figure() -> tuple[plt.Figure, dict]:
     ax_current = axes[1, 0]
     ax_voltage = axes[1, 1]
 
-    line_oven, = ax_oven.plot([], [], linewidth=2.2, color="#a855f7")
+    line_oven, = ax_oven.plot([], [], linewidth=2.2, color="#c62828")
     line_ck1, = ax_ck1.plot([], [], linewidth=2.2, color="#ef4444")
     line_current, = ax_current.plot([], [], linewidth=2.2, color="#d97706")
     line_voltage, = ax_voltage.plot([], [], linewidth=2.2, color="#ca8a04")
 
     axis_styles = [
-        (ax_oven, "Oven PID temperature", "Temperature (°C)", "#7e22ce"),
-        (ax_ck1, "CK-1 temp", "Temperature (°C)", "#b91c1c"),
+        (ax_oven, "Oven PID temperature", "Temperature (°C)", "#c62828"),
+        (ax_ck1, "CK-1 temp", "Temperature (°C)", "#dc2626"),
         (ax_current, "Evaporator current", "Current (A)", "#b45309"),
         (ax_voltage, "Evaporator voltage", "Voltage (V)", "#854d0e"),
     ]
@@ -1269,7 +1345,7 @@ def build_figure() -> tuple[plt.Figure, dict]:
     panel_width = 0.215
     panel_height = 0.84
     panel_ax = fig.add_axes([panel_left, panel_bottom, panel_width, panel_height])
-    panel_ax.set_facecolor("#f8fafc")
+    panel_ax.set_facecolor("#ffffff")
     for spine in panel_ax.spines.values():
         spine.set_color("#cbd5e1")
         spine.set_linewidth(1.1)
@@ -1310,7 +1386,7 @@ def build_figure() -> tuple[plt.Figure, dict]:
         return textbox
 
     panel_text(0.05, 0.985, "NPG Annealings", fontsize=12.4, color="#0f172a", weight="bold")
-    panel_text(0.05, 0.957, "Live controls and status", fontsize=8.2, color="#475569")
+    panel_text(0.05, 0.957, "Live chamber control and monitoring", fontsize=8.2, color="#64748b")
 
     panel_text(0.05, 0.915, "Editable oven PID targets", fontsize=9.4, color="#334155", weight="bold")
     textbox_first = add_textbox("First stage target (°C)", f"{FIRST_STAGE_TARGET_C:.1f}", 0.858)
@@ -1428,15 +1504,15 @@ def update_figure(fig: plt.Figure, artists: dict, state: SharedState) -> None:
     if mode == "pyrometer":
         selected_times, selected_values = pyro_times, pyro_values
         selected_title = f"Raw pyrometer temperature · ε {PYROMETER_PROFILE.emissivity_percent:.0f}%"
-        selected_color = "#0891b2"
+        selected_color = "#1565c0"
     elif mode == "sample":
         selected_times, selected_values = pyro_times, sample_values
         selected_title = f"Estimated sample temperature · {PYROMETER_PROFILE.profile_name}"
-        selected_color = "#ea580c"
+        selected_color = "#d4a000"
     else:
         selected_times, selected_values = oven_times, oven_values
         selected_title = "Oven PID temperature"
-        selected_color = "#a855f7"
+        selected_color = "#c62828"
     artists["line_oven"].set_data([], [])
     artists["line_oven"].set_color(selected_color)
     artists["ax_oven"].set_title(selected_title, fontsize=11, fontweight="bold", color=selected_color, pad=28)
@@ -1686,7 +1762,6 @@ class App:
                 "anneal",
                 RUN_AUTOMATION_OVERRIDES,
             )
-            info(f"Saved effective automation parameters: {parameter_record_path}")
         except Exception as exc:
             info(f"Could not save effective automation parameters: {exc}", Fore.YELLOW)
 
@@ -1696,7 +1771,6 @@ class App:
             with open(pyrometer_profile_path, "w", encoding="utf-8") as fh:
                 json.dump(PYROMETER_SETTINGS, fh, indent=2, sort_keys=True)
                 fh.write("\n")
-            info(f"Saved pyrometer profile: {pyrometer_profile_path}", Fore.CYAN)
         except Exception as exc:
             info(f"Could not save pyrometer profile: {exc}", Fore.YELLOW)
         self.logger = AnnealLogger(run_name, self.output_dir)
@@ -1730,9 +1804,9 @@ class App:
             return
         self.state.temperature_view_mode = mode
         colors = {
-            "oven": ("#f7c6d8", "#a855f7"),
-            "pyrometer": ("#c8eef5", "#0891b2"),
-            "sample": ("#fde0bc", "#ea580c"),
+            "oven": ("#fde8e8", "#c62828"),
+            "pyrometer": ("#e3f0ff", "#1565c0"),
+            "sample": ("#fff8cf", "#d4a000"),
         }
         for key, button in self.artists["temperature_view_buttons"].items():
             inactive, active = colors[key]
@@ -1890,14 +1964,12 @@ class App:
                     )
                     last_flush = now
                 safe_gui_refresh(self.fig, 0.05)
-                if (
-                    self.state.finished_event.is_set()
-                    and self.state.phase == "FINISHED"
-                    and self.state.rampdown_finished_event.is_set()
-                    and self.state.evaporator_poweroff_confirmed_event.is_set()
-                ):
+                if self.state.finished_event.is_set() and self.state.phase == "FINISHED":
+                    # Finalization is time-defined: 10 min after the 0 °C setpoint,
+                    # save the final data/plots and close automatically. Physical
+                    # evaporator power-off confirmation is still displayed when
+                    # relevant, but it no longer keeps the acquisition running for hours.
                     update_figure(self.fig, self.artists, self.state)
-                    time.sleep(1.0)
                     self.state.stop_event.set()
         except KeyboardInterrupt:
             banner("KeyboardInterrupt received. Stopping the run.")
@@ -1968,6 +2040,14 @@ class App:
             info(f"Saved summary: {self.summary_path}", Fore.CYAN)
         except Exception as exc:
             info(f"Could not save summary: {exc}", Fore.RED)
+
+        if self.state.anneal_finished_normally and not self.state.keysight_output_off_at_zero:
+            try:
+                self.keysight.shutdown_output()
+                self.state.keysight_output_off_at_zero = True
+                info("Finalization safety check: Keysight output confirmed OFF.", Fore.YELLOW)
+            except Exception as exc:
+                info(f"Finalization warning: could not confirm Keysight output OFF: {exc}", Fore.RED)
 
         self.logger.close()
         self.pid.close()

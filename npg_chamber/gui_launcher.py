@@ -19,7 +19,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from npg_chamber import __version__
+from npg_chamber import __version__, __build__
 from npg_chamber.common.paths import phase_data_dir
 from npg_chamber.config.automation_modes import (
     PACKAGED_DEFAULT_MODE_NAME,
@@ -55,7 +55,6 @@ from npg_chamber.config.run_parameters import (
 from npg_chamber.workflows.legacy_runner import (
     LEGACY_WORKFLOWS,
     launch_legacy_workflow_process,
-    terminate_process,
     wait_for_phase_process,
 )
 
@@ -117,6 +116,38 @@ NEXT_PHASE = {
     "dpdbba": "anneal",
 }
 
+# Keep routine operator choices immediately visible. Detailed controller gains,
+# filters, quality thresholds and low-level timing remain available in the
+# collapsed Expert mode section of each phase.
+BASIC_PARAMETER_KEYS: dict[str, set[str]] = {
+    "heat": {
+        "HEATING_TRIGGER_TEMP_C", "CK1_RATE_TARGET_A_PER_S", "CALIBRATION_TARGET_SAMPLE_A",
+        "EVAPORATION_CONTROL_MODE", "MOLECULE_CONDITION_PROFILE", "RATE_CONTROL_MAX_TEMP_C",
+        "PID_TEMP_BAND_C", "STEPS_RAMP_UNTIL_TEMP_C",
+        "DEFAULT_RAMP_UP_MODE", "KEYSIGHT_BASE_WORK_CURRENT_A", "KEYSIGHT_STEP_A",
+        "STEPS_RAMP_STEP_PERIOD_S", "RAMPDOWN_STEP_A", "RAMPDOWN_STEP_PERIOD_S",
+        "TEMP_WATCHDOG_MAX_TEMP_C", "KEYSIGHT_SOFT_WARNING_A",
+    },
+    "sputter": {
+        "cycles", "start_without_degassing", "sputter_minutes", "coscon_energy_v",
+        "coscon_emission_a", "anneal_target_c", "anneal_hold_minutes",
+        "target_ar_pressure_mbar", "pressure_warning_mbar", "pressure_emergency_mbar",
+    },
+    "dpdbba": {
+        "DP_DBBA_SAMPLE_EQUIVALENT_THICKNESS_A", "OVEN_TARGET_TEMPERATURE_C",
+        "HEATING_TRIGGER_TEMP_C", "CK1_RATE_TARGET_A_PER_S", "EVAPORATION_CONTROL_MODE",
+        "MOLECULE_CONDITION_PROFILE", "RATE_CONTROL_MAX_TEMP_C", "PID_TEMP_BAND_C",
+        "STEPS_RAMP_UNTIL_TEMP_C", "DEFAULT_RAMP_UP_MODE", "KEYSIGHT_BASE_WORK_CURRENT_A",
+        "KEYSIGHT_STEP_A", "STEPS_RAMP_STEP_PERIOD_S",
+        "TEMP_WATCHDOG_MAX_TEMP_C", "KEYSIGHT_SOFT_WARNING_A",
+    },
+    "anneal": {
+        "INITIAL_WAIT_S", "INITIAL_WAIT_TARGET_C", "FIRST_STAGE_TARGET_C", "FIRST_STAGE_HOLD_S",
+        "SECOND_STAGE_TARGET_C", "SECOND_STAGE_HOLD_S",
+        "KEYSIGHT_RAMPDOWN_STEP_A", "KEYSIGHT_RAMPDOWN_STEP_S", "FIRST_RAMPDOWN_STEP_DELAY_S",
+    },
+}
+
 
 class NPGLauncherApp:
     def __init__(self) -> None:
@@ -132,7 +163,7 @@ class NPGLauncherApp:
         # On Windows/Tkinter, creating StringVar before Tk() can raise:
         # "Too early to create variable: no default root window".
         self.root = tk.Tk()
-        self.root.title(f"NPG Chamber Controller · v{__version__}")
+        self.root.title(f"NPG Chamber Controller · v{__version__} · {__build__}")
 
         self.result_queue: queue.Queue[tuple[str, int, str | None]] = queue.Queue()
         self.running_key: str | None = None
@@ -144,7 +175,7 @@ class NPGLauncherApp:
         self._copying_phase1_run_name = False
         self.session_thickness_ratio: float | None = None
         self.session_ratio_source: str | None = None
-        self.dp_ratio_status_var = tk.StringVar(value="Automatic after Phase 01; asked only if needed")
+        self.dp_ratio_status_var = tk.StringVar(value="Phase 01 ratio will be confirmed before Phase 03")
         self.automation_parameter_values = all_default_values()
         self.automation_modes = load_automation_modes()
         self.active_automation_mode_name = PACKAGED_DEFAULT_MODE_NAME
@@ -165,12 +196,14 @@ class NPGLauncherApp:
         """Let Ctrl+C in CMD close the launcher and any running phase cleanly."""
 
         def _handler(_signum, _frame):
-            print("Close requested from CMD signal. Stopping launcher and running phase ...")
+            print("Close requested from CMD signal.")
             try:
                 self.root.after(0, self.request_close)
             except Exception:
-                self.closing_requested = True
-                self._terminate_running_phase()
+                # Never force-kill an active hardware-control phase from the
+                # launcher signal handler. The phase owns its safe-stop path.
+                if self.current_process is None:
+                    self.closing_requested = True
 
         for sig_name in ("SIGINT", "SIGTERM"):
             sig = getattr(signal, sig_name, None)
@@ -397,7 +430,7 @@ class NPGLauncherApp:
         footer.columnconfigure(0, weight=1)
         ttk.Label(
             footer,
-            text="Tip: Close stops any running phase and exits the launcher. CMD is still used for logs.",
+            text="Tip: while a phase is running, use its Abort / Safe Stop. The launcher will not force-kill hardware control.",
             style="Footer.TLabel",
         ).grid(row=0, column=0, sticky="w")
 
@@ -498,10 +531,10 @@ class NPGLauncherApp:
         tk.Label(
             outer,
             text=(
-                "These values are passed only to the selected phase process. They do not rewrite the Python files "
-                "and return to the packaged defaults when the launcher is closed. The shared Pyrometer tab "
-                "sets the material profile used by Phases 01, 03 and 04. COM ports and baud rates remain fixed; "
-                "hard safety limits are intentionally not editable here."
+                "Basic controls contain the run recipe, operator-facing control choices and top-level safety limits. "
+                "Open Expert mode only for controller tuning, filters, signal-quality thresholds or low-level timing. "
+                "Changes apply only to the current launcher session "
+                "unless saved as a mode. COM ports, baud rates and fixed equipment hard stops remain locked."
             ),
             bg="#f7f9fc",
             fg="#334155",
@@ -560,84 +593,96 @@ class NPGLauncherApp:
             values = self.automation_parameter_values[phase.key]
             phase_vars: dict[str, object] = {}
             editor_vars[phase.key] = phase_vars
-            current_group: str | None = None
-            row = 0
+            phase_specs = list(specs_for_phase(phase.key))
+            basic_keys = BASIC_PARAMETER_KEYS.get(phase.key, set())
+            basic_specs = [spec for spec in phase_specs if spec.key in basic_keys]
+            expert_specs = [spec for spec in phase_specs if spec.key not in basic_keys]
 
-            for spec in specs_for_phase(phase.key):
-                if spec.group != current_group:
-                    current_group = spec.group
+            def render_parameter_specs(parent, specs, *, start_row=0):
+                row = start_row
+                grouped: dict[str, list[object]] = {}
+                for spec in specs:
+                    grouped.setdefault(spec.group, []).append(spec)
+                for group_name, group_specs in grouped.items():
                     tk.Label(
-                        content,
-                        text=current_group,
-                        bg=phase.accent,
-                        fg="#111827",
-                        font=("Segoe UI", 11, "bold"),
-                        anchor="w",
-                        padx=10,
-                        pady=5,
+                        parent, text=group_name, bg=phase.accent, fg="#111827",
+                        font=("Segoe UI", 11, "bold"), anchor="w", padx=10, pady=5,
                     ).grid(row=row, column=0, columnspan=4, sticky="ew", padx=10, pady=(12 if row else 8, 5))
                     row += 1
+                    for spec in group_specs:
+                        tk.Label(
+                            parent, text=spec.label, bg=phase.card_bg, fg="#111827",
+                            font=("Segoe UI", 9, "bold"), anchor="w",
+                        ).grid(row=row, column=0, sticky="nw", padx=(14, 8), pady=5)
 
-                tk.Label(
-                    content,
-                    text=spec.label,
-                    bg=phase.card_bg,
-                    fg="#111827",
-                    font=("Segoe UI", 9, "bold"),
-                    anchor="w",
-                ).grid(row=row, column=0, sticky="nw", padx=(14, 8), pady=5)
+                        if spec.kind == "bool":
+                            var = tk.BooleanVar(value=bool(values[spec.key]))
+                            widget = tk.Checkbutton(
+                                parent, variable=var, bg=phase.card_bg,
+                                activebackground=phase.card_bg, selectcolor="#ffffff",
+                            )
+                        elif spec.kind == "choice":
+                            var = tk.StringVar(value=str(values[spec.key]))
+                            widget = ttk.Combobox(parent, textvariable=var, values=spec.choices, state="readonly", width=18)
+                        else:
+                            var = tk.StringVar(value=spec.format_display(values[spec.key]))
+                            widget = tk.Entry(
+                                parent, textvariable=var, bg="#ffffff", fg="#111827",
+                                insertbackground="#111827", relief="flat", highlightthickness=1,
+                                highlightbackground="#94a3b8", highlightcolor=phase.accent,
+                                font=("Segoe UI", 9), width=20,
+                            )
+                        phase_vars[spec.key] = var
+                        widget.grid(row=row, column=1, sticky="ew", padx=4, pady=5)
 
-                if spec.kind == "bool":
-                    var = tk.BooleanVar(value=bool(values[spec.key]))
-                    widget = tk.Checkbutton(
-                        content,
-                        variable=var,
-                        bg=phase.card_bg,
-                        activebackground=phase.card_bg,
-                        selectcolor="#ffffff",
-                    )
-                elif spec.kind == "choice":
-                    var = tk.StringVar(value=str(values[spec.key]))
-                    widget = ttk.Combobox(content, textvariable=var, values=spec.choices, state="readonly", width=18)
+                        tk.Label(
+                            parent, text=spec.unit, bg=phase.card_bg, fg="#334155",
+                            font=("Segoe UI", 9), anchor="w", width=10,
+                        ).grid(row=row, column=2, sticky="nw", padx=6, pady=5)
+                        tk.Label(
+                            parent, text=spec.description, bg=phase.card_bg, fg="#475569",
+                            font=("Segoe UI", 8), justify="left", wraplength=390, anchor="w",
+                        ).grid(row=row, column=3, sticky="nw", padx=(8, 14), pady=5)
+                        row += 1
+                parent.columnconfigure(1, weight=0)
+                parent.columnconfigure(3, weight=1)
+                return row
+
+            tk.Label(
+                content, text="Basic controls", bg=phase.card_bg, fg="#0f172a",
+                font=("Segoe UI", 13, "bold"), anchor="w",
+            ).grid(row=0, column=0, columnspan=4, sticky="ew", padx=12, pady=(10, 0))
+            tk.Label(
+                content, text="Run recipe, control behaviour and safety limits you may reasonably review before a run.",
+                bg=phase.card_bg, fg="#64748b", font=("Segoe UI", 9), anchor="w",
+            ).grid(row=1, column=0, columnspan=4, sticky="ew", padx=12, pady=(2, 2))
+            row = render_parameter_specs(content, basic_specs, start_row=2)
+
+            expert_button = tk.Button(
+                content, text="Expert mode  ▸", bg="#e2e8f0", fg="#0f172a",
+                activebackground="#cbd5e1", relief="solid", bd=1, padx=12, pady=7,
+                font=("Segoe UI", 9, "bold"), cursor="hand2", anchor="w",
+            )
+            expert_button.grid(row=row, column=0, columnspan=4, sticky="ew", padx=10, pady=(16, 6))
+            row += 1
+            expert_frame = tk.Frame(content, bg=phase.card_bg)
+            expert_frame.grid(row=row, column=0, columnspan=4, sticky="ew")
+            expert_frame.grid_remove()
+            expert_open = {"value": False}
+
+            def toggle_expert(frame=expert_frame, button=expert_button, state=expert_open, canvas=canvas, content=content):
+                state["value"] = not state["value"]
+                if state["value"]:
+                    frame.grid()
+                    button.configure(text="Expert mode  ▾")
                 else:
-                    var = tk.StringVar(value=spec.format_display(values[spec.key]))
-                    widget = tk.Entry(
-                        content,
-                        textvariable=var,
-                        bg="#ffffff",
-                        fg="#111827",
-                        insertbackground="#111827",
-                        relief="flat",
-                        highlightthickness=1,
-                        highlightbackground="#94a3b8",
-                        highlightcolor=phase.accent,
-                        font=("Segoe UI", 9),
-                        width=20,
-                    )
-                phase_vars[spec.key] = var
-                widget.grid(row=row, column=1, sticky="ew", padx=4, pady=5)
+                    frame.grid_remove()
+                    button.configure(text="Expert mode  ▸")
+                content.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
 
-                tk.Label(
-                    content,
-                    text=spec.unit,
-                    bg=phase.card_bg,
-                    fg="#334155",
-                    font=("Segoe UI", 9),
-                    anchor="w",
-                    width=10,
-                ).grid(row=row, column=2, sticky="nw", padx=6, pady=5)
-                tk.Label(
-                    content,
-                    text=spec.description,
-                    bg=phase.card_bg,
-                    fg="#475569",
-                    font=("Segoe UI", 8),
-                    justify="left",
-                    wraplength=390,
-                    anchor="w",
-                ).grid(row=row, column=3, sticky="nw", padx=(8, 14), pady=5)
-                row += 1
-
+            expert_button.configure(command=toggle_expert)
+            render_parameter_specs(expert_frame, expert_specs, start_row=0)
             content.columnconfigure(1, weight=0)
             content.columnconfigure(3, weight=1)
 
@@ -1237,7 +1282,7 @@ class NPGLauncherApp:
                 "2. Review the phase tabs; change only what is needed for this run.   "
                 "3. Click Apply. The source files and the saved mode remain unchanged.\n\n"
                 "Not stored in modes: run names, the Phase 01 thickness ratio, COM ports, baud rates, "
-                "or hard safety limits."
+                "or fixed equipment hard stops. The saved mode does include the approved Phase 01/03 watchdog maximum and automatic-current cap."
             ),
             bg="#ffffff", fg="#475569", font=("Segoe UI", 9), justify="left",
             wraplength=850, anchor="w"
@@ -1574,46 +1619,94 @@ class NPGLauncherApp:
         return f"{float(value):.12g}"
 
     def _get_or_ask_thickness_ratio(self) -> float | None:
-        """Return the Phase-1 ratio for DP-DBBA, asking only if this session lacks it."""
+        """Confirm or collect the calibration ratio before every Phase 03 launch.
 
-        if self.session_thickness_ratio is not None and self.session_thickness_ratio > 0:
-            return self.session_thickness_ratio
+        A ratio recovered from Phase 01 is never used silently. The operator is
+        shown the exact value and explicitly accepts it or chooses to replace it.
+        If no ratio is available, Phase 03 keeps the existing manual-entry path.
+        """
 
-        ratio_text = self.simpledialog.askstring(
-            "Thickness ratio required",
-            "No Heat up + Calibration ratio is available in this launcher session.\n\n"
-            "This usually means the launcher was restarted or Phase 01 was not run first.\n\n"
-            "Enter the positive thickness ratio obtained in Heat up + Calibration:",
-            parent=self.root,
-        )
-        if ratio_text is None:
-            return None
-
-        ratio_text = ratio_text.strip().replace(",", ".")
-        try:
-            ratio_value = float(ratio_text)
-        except Exception:
-            self.messagebox.showerror(
-                "Invalid thickness ratio",
-                "The DP-DBBA thickness ratio must be a positive number.",
+        existing = self.session_thickness_ratio
+        if existing is not None and existing > 0:
+            accepted = self.messagebox.askyesno(
+                "Confirm thickness ratio",
+                "Do you agree with the thickness ratio obtained?\n\n"
+                f"Thickness ratio obtained in Phase 1: {existing:.6g}\n\n"
+                "Yes: continue with this ratio.\n"
+                "No: modify the ratio before starting Phase 03.",
+                parent=self.root,
             )
-            return None
+            if accepted:
+                return existing
 
-        if ratio_value <= 0:
-            self.messagebox.showerror(
-                "Invalid thickness ratio",
-                "The DP-DBBA thickness ratio must be a positive number.",
+            replacement = self._ask_manual_thickness_ratio(
+                initial_value=existing,
+                modifying=True,
             )
-            return None
+            if replacement is None:
+                return None
+            self.session_thickness_ratio = replacement
+            self.session_ratio_source = "operator-modified value before Phase 03"
+            self._update_ratio_status()
+            return replacement
 
+        ratio_value = self._ask_manual_thickness_ratio()
+        if ratio_value is None:
+            return None
         self.session_thickness_ratio = ratio_value
-        self.session_ratio_source = "manual entry after launcher restart"
+        self.session_ratio_source = "manual entry before Phase 03"
         self._update_ratio_status()
         return ratio_value
 
+    def _ask_manual_thickness_ratio(
+        self,
+        *,
+        initial_value: float | None = None,
+        modifying: bool = False,
+    ) -> float | None:
+        """Ask for one positive ratio, retrying invalid input until cancel or success."""
+
+        if modifying:
+            prompt = (
+                "Enter the thickness ratio to use for Phase 03.\n\n"
+                "The value must be a positive number:"
+            )
+            title = "Modify thickness ratio"
+        else:
+            prompt = (
+                "No Heat up + Calibration ratio is available in this launcher session.\n\n"
+                "This usually means the launcher was restarted or Phase 01 was not run first.\n\n"
+                "Enter the positive thickness ratio obtained in Heat up + Calibration:"
+            )
+            title = "Thickness ratio required"
+
+        while True:
+            kwargs = {"parent": self.root}
+            if initial_value is not None:
+                kwargs["initialvalue"] = self._format_ratio_for_env(initial_value)
+            ratio_text = self.simpledialog.askstring(title, prompt, **kwargs)
+            if ratio_text is None:
+                return None
+
+            ratio_text = ratio_text.strip().replace(",", ".")
+            try:
+                ratio_value = float(ratio_text)
+            except (TypeError, ValueError):
+                ratio_value = 0.0
+
+            if ratio_value > 0:
+                return ratio_value
+
+            self.messagebox.showerror(
+                "Invalid thickness ratio",
+                "The DP-DBBA thickness ratio must be a positive number.",
+                parent=self.root,
+            )
+
+
     def _update_ratio_status(self) -> None:
         if self.session_thickness_ratio is None:
-            self.dp_ratio_status_var.set("Automatic after Phase 01; asked only if needed")
+            self.dp_ratio_status_var.set("Phase 01 ratio will be confirmed before Phase 03")
             return
         source = self.session_ratio_source or "current launcher session"
         self.dp_ratio_status_var.set(
@@ -1801,19 +1894,44 @@ class NPGLauncherApp:
         if self.parameter_button is not None:
             self.parameter_button.configure(state=state)
 
-    def _terminate_running_phase(self) -> None:
+    def _phase_process_is_running(self) -> bool:
         with self.process_lock:
             process = self.current_process
-            self.current_process = None
-
-        if process is not None and process.poll() is None:
-            print("Close requested: stopping the running phase process ...")
-            terminate_process(process)
+        return process is not None and process.poll() is None
 
     def request_close(self) -> None:
-        """Close the GUI and stop any running phase process."""
+        """Close the launcher without bypassing a phase hardware-safe shutdown.
 
-        if self.closing_requested and self.current_process is None:
+        A running phase is a separate hardware-control process and owns its own
+        Abort / Safe Stop implementation. Force-terminating that process from
+        the launcher could skip ``finally``/``atexit`` cleanup and leave external
+        equipment in an unknown state, so launcher close is intentionally
+        blocked until the phase exits normally or completes its safe-stop path.
+        """
+
+        if self._phase_process_is_running() or self.running_key is not None:
+            phase = PHASE_BY_KEY.get(self.running_key) if self.running_key else None
+            phase_label = (
+                f"{phase.number} {phase.title}" if phase is not None else "The current phase"
+            )
+            message = (
+                f"{phase_label} is still running.\n\n"
+                "For hardware safety, the unified launcher will not force-stop an active phase. "
+                "Use Abort / Safe Stop inside the phase GUI and wait until that phase has fully "
+                "finished and released the COM ports. Then close the launcher."
+            )
+            print("Launcher close blocked while a phase is active. Use the phase Abort / Safe Stop.")
+            try:
+                self.status_var.set("Close blocked: use the active phase Abort / Safe Stop first.")
+            except Exception:
+                pass
+            try:
+                self.messagebox.showwarning("Phase still running", message, parent=self.root)
+            except Exception:
+                pass
+            return
+
+        if self.closing_requested:
             try:
                 self.root.destroy()
             except Exception:
@@ -1822,10 +1940,9 @@ class NPGLauncherApp:
 
         self.closing_requested = True
         try:
-            self.status_var.set("Closing launcher and stopping any running phase ...")
+            self.status_var.set("Closing launcher ...")
         except Exception:
             pass
-        self._terminate_running_phase()
         try:
             self.root.quit()
         except Exception:
