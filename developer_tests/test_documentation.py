@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -80,3 +81,38 @@ def test_release_metadata_matches_v17_9_publication() -> None:
         assert historical_version in changelog
     assert "include READ?ME.md" in manifest
     assert "include READ ME.md" not in manifest
+
+
+def test_project_credits_and_documentation_license_are_explicit() -> None:
+    readme = Path("READ ME.md").read_text(encoding="utf-8")
+    license_summary = Path("LICENSE.md").read_text(encoding="utf-8")
+    legal_text = Path("LICENSES/CC-BY-4.0.txt").read_text(encoding="utf-8")
+    manifest = Path("MANIFEST.in").read_text(encoding="utf-8")
+
+    for credit in (
+        "Laura Rodríguez Jordán",
+        "Roger Simon de Febrer",
+        "Piotr Krzysztof Ciochon",
+    ):
+        assert credit in readme
+        assert credit in license_summary
+
+    assert "Creative Commons Attribution 4.0 International" in license_summary
+    assert "Creative Commons Attribution 4.0 International Public License" in legal_text
+    assert "include LICENSES/CC-BY-4.0.txt" in manifest
+
+
+def test_phase_explanations_are_concise_single_page_pdfs() -> None:
+    explanation_dir = Path("npg_chamber/script_explanations")
+    expected = {
+        "01_heat_up_calibration_explanation.pdf",
+        "02_sputtering_annealing_explanation.pdf",
+        "03_dp_dbba_evaporation_explanation.pdf",
+        "04_npg_annealings_explanation.pdf",
+    }
+
+    assert {path.name for path in explanation_dir.glob("*.pdf")} == expected
+    for filename in expected:
+        data = (explanation_dir / filename).read_bytes()
+        assert data.startswith(b"%PDF-")
+        assert len(re.findall(rb"/Type\s*/Page\b", data)) == 1
