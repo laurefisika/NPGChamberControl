@@ -67,5 +67,16 @@ def test_release_metadata_matches_v17_9_publication() -> None:
     assert "version: 0.9.36" in citation
     assert "date-released: 2026-08-11" in citation
     assert "Repository publication correction · 2026-08-18" in changelog
+    assert "## Release history at a glance" in changelog
+    assert "## Historical release record (v16 and earlier)" in changelog
+    for historical_version in (
+        "## 0.9.22 - Project archive v16",
+        "## 0.9.21 - Project archive v15",
+        "## 0.9.20 - Project archive v14",
+        "## 0.9.13 - Automated COSCON control in Phase 02",
+        "## 0.9.0 — Centralized Data Samples output folders",
+        "## 0.8.5 — Final source verification",
+    ):
+        assert historical_version in changelog
     assert "include READ?ME.md" in manifest
     assert "include READ ME.md" not in manifest
