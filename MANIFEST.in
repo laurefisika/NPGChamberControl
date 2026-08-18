@@ -1,13 +1,10 @@
 include LICENSE.md
 include CHANGELOG.md
+include READ?ME.md
 include SOURCE_CODE_MANIFEST.json
-include RATE_PID_VALIDATION.md
+include START_NPG_CHAMBER.bat
 recursive-include npg_chamber/legacy_scripts *.py
-recursive-include original_scripts_backup *.py
+recursive-include npg_chamber/script_explanations *.pdf
 recursive-include diagnostic_tools *.py
 recursive-include developer_tests *.py
 recursive-include maintenance_tools *.py
-
-include START_NPG_CHAMBER.bat
-
-recursive-include npg_chamber/script_explanations *.pdf

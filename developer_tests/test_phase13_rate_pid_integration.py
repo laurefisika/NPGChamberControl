@@ -30,6 +30,10 @@ def test_phase_01_and_03_integrate_rate_feedback_with_temperature_supervision() 
         "def check_active_rate_signal_or_stop(",
         "RATE_PID_SIGNAL_TIMEOUT_S",
         "RATE_CONTROL_MAX_TEMP_C",
+        "TEMP_WATCHDOG_MAX_TEMP_C",
+        "KEYSIGHT_SOFT_WARNING_A = 0.660",
+        "KEYSIGHT_HARD_STOP_A = 0.680",
+        "KEYSIGHT_INSTRUMENT_OCP_A = KEYSIGHT_HARD_STOP_A + KEYSIGHT_INSTRUMENT_OCP_MARGIN_A",
         "COMPOUND_TEMP_GUARD_BAND_C",
         "compound_temperature_guard=True",
         "get_temperature_watchdog_reference_c()",
@@ -78,3 +82,11 @@ def test_rate_pid_handover_requires_a_fresh_qmb_rate() -> None:
         function = source[start:end]
         assert "latest_ck1_rate_age_s()" in function
         assert "rate_age_s > RATE_PID_SIGNAL_TIMEOUT_S" in function
+
+
+def test_watchdog_uses_editable_absolute_maximum_temperature() -> None:
+    for path in PHASES:
+        source = path.read_text(encoding="utf-8")
+        assert "TEMP_WATCHDOG_MAX_TEMP_C = 255.0" in source
+        assert "hard_limit = float(TEMP_WATCHDOG_MAX_TEMP_C)" in source
+        assert "TEMP_WATCHDOG_HARD_MARGIN_C" not in source

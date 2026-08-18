@@ -20,7 +20,7 @@ def controller() -> RatePidController:
             max_down_step_a=0.005,
             integral_limit_thickness=25.0,
             min_current_a=0.0,
-            max_current_a=0.670,
+            max_current_a=0.660,
         )
     )
 
@@ -102,13 +102,13 @@ def test_rate_pid_anti_windup_at_current_ceiling() -> None:
     first = pid.update(
         target_rate=0.4,
         measured_rate=0.1,
-        current_setpoint_a=0.670,
+        current_setpoint_a=0.660,
         now_s=0.0,
     )
     second = pid.update(
         target_rate=0.4,
         measured_rate=0.1,
-        current_setpoint_a=0.670,
+        current_setpoint_a=0.660,
         now_s=8.0,
     )
     assert first.delta_a == 0.0

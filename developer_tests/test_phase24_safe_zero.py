@@ -34,6 +34,9 @@ def test_phase4_finishes_after_ten_minutes_at_cooldown_target() -> None:
     assert "FINAL_VENT_TARGET_C" not in phase4
     assert "FINAL_SETPOINT_30" not in phase4
     assert "30 °C" not in phase4
+    assert 'if self.state.finished_event.is_set() and self.state.phase == "FINISHED":' in phase4
+    assert 'and self.state.evaporator_poweroff_confirmed_event.is_set()' not in phase4
+    assert 'Finalization safety check: Keysight output confirmed OFF.' in phase4
 
 
 def test_phase4_abort_uses_cooldown_target_and_sequence_is_lower() -> None:

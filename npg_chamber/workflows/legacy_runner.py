@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from npg_chamber import __version__, __build__
 from npg_chamber.common.paths import legacy_dir, phase_data_dir
 from npg_chamber.common.serial_handoff import (
     SerialHandoffError,
@@ -161,9 +161,9 @@ def launch_legacy_workflow_process(
 ) -> subprocess.Popen:
     """Start one workflow script and return the running process handle.
 
-    This is used by the GUI launcher so the Close button can stop a running
-    phase before closing the GUI/CMD window. The experiment script itself still
-    owns all instrument-control logic; this function only starts the process.
+    The experiment script owns all instrument-control and safe-stop logic.
+    The launcher only starts and waits for the child process; it deliberately
+    does not force-terminate an active phase.
     """
 
     workflow = _workflow_for_key(key)
@@ -175,6 +175,7 @@ def launch_legacy_workflow_process(
     # another program before the experimental script begins opening instruments.
     verify_all_chamber_ports_released(context=f"before phase {key}")
 
+    print(f"Software build: v{__version__} ({__build__})")
     print(f"Launching: {workflow.title}")
     print(f"Script: {workflow.path}")
     print(f"Data folder: {data_dir}")
@@ -194,57 +195,6 @@ def launch_legacy_workflow_process(
         start_new_session=start_new_session,
     )
 
-
-def terminate_process(process: subprocess.Popen, timeout_s: float = 5.0) -> int | None:
-    """Stop a workflow process and its GUI/child processes as reliably as possible."""
-
-    if process.poll() is not None:
-        return process.returncode
-
-    if sys.platform.startswith("win"):
-        # Matplotlib/pywebview windows may live in child processes. taskkill /T /F
-        # prevents the unified launcher from hanging when Close or Ctrl+C is used.
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=max(2.0, timeout_s),
-                check=False,
-            )
-        except Exception:
-            try:
-                process.kill()
-            except Exception:
-                pass
-    else:
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-        except Exception:
-            try:
-                process.terminate()
-            except Exception:
-                pass
-
-        deadline = time.time() + max(0.1, timeout_s)
-        while time.time() < deadline:
-            if process.poll() is not None:
-                return process.returncode
-            time.sleep(0.1)
-
-        if process.poll() is None:
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except Exception:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-
-    try:
-        return process.wait(timeout=2.0)
-    except Exception:
-        return process.returncode
 
 
 def run_legacy_workflow(key: str, extra_env: dict[str, str] | None = None) -> int:

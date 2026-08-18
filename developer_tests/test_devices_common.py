@@ -67,10 +67,10 @@ def test_keysight_clamped_current_is_explicit():
     fake = FakeSerial()
     psu = KeysightE3632A("COM17", serial_instance=fake)
 
-    commanded = psu.set_current(0.8, max_current_a=0.67)
+    commanded = psu.set_current(0.8, max_current_a=0.66)
 
-    assert commanded == 0.67
-    assert fake.writes[-1] == b"CURR 0.670\n"
+    assert commanded == 0.66
+    assert fake.writes[-1] == b"CURR 0.660\n"
 
 
 def test_parse_helpers():

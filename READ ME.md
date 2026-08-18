@@ -2,78 +2,25 @@
 
 **Project:** ICN2 NPG synthesis chamber workflows  
 **Package name:** `npg-chamber`  
-**Current release:** `0.9.21`
+**Current release:** `0.9.36`
 
+## Current operator interface
 
-### Selectable temperature, rate and compound feedback in 0.9.21 / project archive v15
+The unified launcher starts the four chamber phases and keeps routine run setup in one place. **Change automatization parameters** now shows the settings normally needed before a run first; detailed controller gains, filtering, signal-quality and qualification parameters remain available under the collapsed **Expert mode** section for each phase. Fixed equipment hard stops, COM ports and baud rates are not exposed as routine run controls.
 
-Phases **01 Heat up + Calibration** and **03 DP-DBBA Evaporation** now offer a new **Evaporation feedback mode** in **Change automatization parameters**:
+For Phases 01 and 03, the main run-level safety values remain independently configurable: **Rate-control temperature ceiling** (250 °C default), **Watchdog maximum temperature** (255 °C default) and **Maximum automatic current cap** (0.660 A default). The fixed software hard-current stop remains 0.680 A and is not editable from the launcher.
 
-- **temperature** keeps the established CK-1 temperature PID unchanged and remains the packaged default until the new loop is validated on the real chamber;
-- **rate** uses the filtered CK-1 QMB rate as the primary Keysight-current feedback after a conservative temperature/rate handover;
-- **compound** uses the same rate PID but progressively suppresses positive current corrections as CK-1 approaches the editable **Rate-control temperature ceiling**. This is the recommended supervised mode for compensating fresh versus aged molecular loads.
+Phase 01 calibration uses the exact interpolated Sample-QMB target crossing and synchronized CK-1/Sample QMB linearity. It does **not** compare the new calibration ratio against a fixed historical ratio, because the expected ratio can legitimately change with source condition and time since refill.
 
-The rate controller uses a spike-resistant trimmed average, asymmetric current limits (slower increases and faster decreases), anti-windup, a small QMB dead band and a required sequence of new in-band readings before the shutter-open prompt. After rate feedback has taken control, a stale CK-1 rate signal triggers a safe Keysight stop instead of allowing open-loop heating. The independent CK-1 temperature watchdog remains active; in rate/compound modes its reference becomes the rate-control temperature ceiling.
+Phases 01 and 03 use the native PySide6 + PyQtGraph dashboard. Phase 02 uses the task-focused pywebview interface and supports **Start without initial Degas** for legitimate continuation runs. Phase 04 sends its final cooldown setpoint to **0 °C**, holds it for **10 minutes**, saves the final data and plots, and then closes automatically instead of logging many hours of passive cooldown.
 
-The new rate feedback remains active during shutter waiting and throughout calibration/evaporation. In Phase 03, opening the shutter now resets only the thickness measurement window and deliberately preserves the continuous QMB rate history needed by the controller.
+The shared pyrometer profile remains monitoring-only: its raw and estimated sample temperatures are displayed and saved but do not make PID, Keysight, shutter, transition or safety decisions.
 
-The packaged initial rate-PID gains are deliberately conservative and must be checked with a supervised chamber test before making **compound** the laboratory default.
-Use `RATE_PID_VALIDATION.md` for the step-by-step chamber validation and tuning checklist.
+## Local Python runtime
 
-### Phase subprocess import correction in 0.9.21
+`START_NPG_CHAMBER.bat` uses the Windows `python` command. On first use it creates `.venv` and installs the package dependencies. On later starts it reuses the existing environment without reinstalling packages. If the project folder has been moved, the launcher first repairs only the editable project link; it installs dependencies again only if the existing environment is genuinely incomplete.
 
-The unified launcher starts every phase inside its corresponding `Data Samples` output folder. The phase environment now places the root of the currently launched project at the beginning of `PYTHONPATH`, ensuring that imports such as `npg_chamber.common` resolve from that same v15 source tree even when the folder is renamed or moved.
-
-This corrects the Phase 03 startup error `ModuleNotFoundError: No module named 'npg_chamber'`. The correction is in the shared `legacy_runner.py`, so it protects all four phase subprocesses; the individual phase scripts and their experimental logic do not need a separate import-path workaround.
-
-### Safe 0 °C completion in 0.9.20 / project archive v14
-
-Phase 02 **Abort / Safe Stop** now attempts and verifies an oven PID setpoint of **0 °C** instead of 20 °C before completing the established COSCON and shutdown sequence.
-
-Phase 04 no longer sends a final 30 °C setpoint. After the second annealing hold, it sends the cooldown target—**0 °C by default**—holds that PID SV for **10 minutes**, and then finishes with the PID SV still at 0 °C. Phase 04 Abort / Safe Stop uses the same cooldown target. The obsolete **Final PID target** launcher field has been removed, and older saved modes containing it are migrated automatically.
-
-The **Phase sequence** block in the Phase 04 GUI has also been moved slightly lower and shortened to remain readable.
-
-### Phase 02 continuation runs in 0.9.19
-
-In **Change automatization parameters → Phase 02 → Workflow**, the checkbox **Start without initial Degas** allows a new Phase 02 execution to begin directly with the configured sputter-anneal cycles. It is intended for continuing the same chamber preparation after an earlier partial Phase 02 run, such as completing one remaining cycle on a later session.
-
-The checkbox is **off by default**. When it is enabled, Phase 02 asks for an additional preflight confirmation that the operator has verified that a new Degas is not required. The GUI marks the Degas workflow step as skipped, and the choice is recorded in the effective automation-parameter file saved with the run. Because this decision depends on the immediate physical history of the chamber, it is not retained inside reusable saved automation modes.
-
-This option does not disable any sputtering interlock: pressure, COSCON mode, hardware interlock, energy, emission confirmation and automatic return to Standby remain active.
-
-### Saved full-chamber modes, pyrometer material modes and refined operator views in 0.9.18
-
-The **Saved automation modes** tab inside **Change automatization parameters** stores complete tutor-approved chamber recipes. A mode contains every editable startup value for Phases 01–04 plus the selected pyrometer profile. Examples can be named **NPG at 600 C** or **GNR at 500 C**. Loading a mode fills every parameter tab in one step, after which the operator can still change any field for the current launcher session. Full-chamber modes are stored in:
-
-```text
-Data Samples/Configuration/automation_modes.json
-```
-
-Run names, the Phase 01 thickness ratio, COM ports, baud rates and hard safety limits are deliberately not stored in these modes.
-
-The shared **Pyrometer** tab inside **Change automatization parameters** now supports persistent material/calibration modes. Operators can create, name, save, reload and delete custom modes; the validated **Au/mica — validated** mode remains protected. Each mode keeps the instrument emissivity, sample-temperature slope/intercept, minimum calibrated raw temperature and default graph view together. Modes are stored in:
-
-```text
-Data Samples/Configuration/pyrometer_profiles.json
-```
-
-The validated Au/mica mode uses 10% emissivity and:
-
-```text
-T_sample = 1.69959 × T_pyro + 28.20193 °C
-calibrated for T_pyro >= 90 °C
-```
-
-Below the selected minimum, the estimated sample temperature is still calculated, plotted and saved, but the GUI and logs mark it as **extrapolated below calibrated range**. The IPE 140 remains monitoring-only and never changes PID, Keysight, shutter, phase-transition or safety decisions.
-
-The IPE 140 uses `COM10`, 38400 baud, 8E1 and address `00`. Phases 01, 03 and 04 now share the compact **OVEN PID / PYROMETER / SAMPLE EST.** selector. All available temperature series are logged regardless of the selected live view. Emissivity readback uses the parameter query proven on the chamber instrument. A requested change uses the UPP four-digit setting command and is then verified independently from the returned parameter string. An emissivity setup warning no longer disables temperature monitoring.
-
-Phase 02 keeps COSCON mode and the hardware interlock in its automation and safety checks, but they no longer occupy prominent permanent cards. The operator sees one simple **Waiting / Ready / Check** system result; the technical mode and interlock values remain available under **Auxiliary diagnostics**. The title no longer contains **ICN2**.
-
-Phase 01 and Phase 03 now use the same visual system as the newer dashboards: a rounded live-phase badge, coloured graph headings, wider spacing between graph rows, a dedicated temperature-selector strip and pastel control cards. Their equivalent controls use the same wording and order, while all original editable fields, shutter actions, manual-current controls, abort/finish actions and experimental logic remain available.
-
-**Purpose:** provide one clean, installable launcher for the four final chamber scripts while preserving the internal logic of those scripts.
+Release history and software changes are kept only in `CHANGELOG.md`.
 
 ---
 
@@ -88,7 +35,7 @@ This document is the single Standard Operating Procedure for the packaged projec
 - what the GUI buttons do;
 - useful command-line commands;
 - what files/folders are created;
-- how to fall back to the original scripts;
+- how to diagnose startup or phase problems;
 - what to check before using the real chamber hardware.
 
 The package only organizes and launches the scripts. It does **not** replace operator supervision. Always check the chamber, Keysight, PID, pressure, shutters, leak valve, sputter electronics, and oven state before and after every phase.
@@ -112,7 +59,7 @@ When launched without extra options, it opens a graphical window with buttons fo
 3. DP-DBBA Evaporation
 4. NPG Annealings
 
-Each button launches the corresponding final script as a separate Python process. The launcher provides GUI startup fields for the run name of each phase. For DP-DBBA, the launcher automatically reuses the thickness ratio saved by Phase 01 during the same launcher session; it only asks for the ratio manually if the launcher was restarted or Phase 01 was not run first. The scripts still keep their own plots, GUI windows, prompts, serial communication, and safety logic. The CMD window remains open for logs and any rare extra prompts that may still be required during a run.
+Each button launches the corresponding final script as a separate Python process. The launcher provides GUI startup fields for the run name of each phase. For DP-DBBA, the launcher recovers the thickness ratio saved by Phase 01 during the same launcher session and always asks the operator to confirm that ratio before Phase 03; the operator can accept it or replace it, while a missing ratio is entered manually. The scripts still keep their own phase windows, prompts, serial communication, data saving, and safety logic. Phases 01 and 03 use the shared Qt/PyQtGraph dashboard; Phase 02 keeps pywebview and Phase 04 keeps its established Matplotlib interface. The CMD window remains open for logs and any rare extra prompts that may still be required during a run.
 
 The package also provides direct command-line launch options, diagnostics, and direct fallback access to the authoritative packaged scripts.
 
@@ -126,10 +73,8 @@ The four authoritative runtime scripts are preserved inside:
 npg_chamber/legacy_scripts/
 ```
 
-A separate recovery/reference snapshot of the four current scripts is retained inside:
 
 ```text
-original_scripts_backup/
 ```
 
 The launcher never imports or executes the backup folder automatically. In this package, each backup is a byte-for-byte copy of its current authoritative runtime script, so a maintainer can restore a working file if the active copy is accidentally damaged.
@@ -201,7 +146,6 @@ npg_chamber_project/
 │  ├─ common/                  # shared helper utilities
 │  └─ config/                  # shared port/default configuration helpers
 │
-├─ original_scripts_backup/    # current phase-script snapshot; recovery/reference only
 ├─ diagnostic_tools/           # optional manual hardware diagnostic scripts
 ├─ developer_tests/            # safe tests that do not require chamber hardware
 └─ maintenance_tools/          # general package check script
@@ -222,7 +166,6 @@ Strongly recommended:
 
 ```text
 CHANGELOG.md
-original_scripts_backup/
 ```
 
 The backup is not needed to run the chamber, but it should be kept with the laboratory project for recovery and source comparison.
@@ -237,7 +180,6 @@ maintenance_tools/
 
 The optional folders are kept because they are useful for troubleshooting, validation, and future maintenance.
 
-The release contains one authoritative runtime copy of each phase script under `npg_chamber/legacy_scripts/` and one current recovery/reference snapshot under `original_scripts_backup/`. All four backup files are byte-for-byte identical to their matching runtime files at release time. The backup is excluded from normal launcher and workflow execution.
 
 Generated files such as `__pycache__/`, `.pytest_cache/`, `build/`, `dist/`, and `*.egg-info/` are not part of the clean release ZIP. They may appear locally after running tests or building a wheel, and they can be deleted safely.
 
@@ -285,7 +227,7 @@ npg-chamber --list
 Expected version:
 
 ```text
-0.9.21
+0.9.36
 ```
 
 ---
@@ -294,6 +236,8 @@ Expected version:
 ### One-click start on Windows
 
 For daily use, you do **not** need to type `.venv\Scripts\activate` manually. Use the file in the project root:
+
+> **Hardware-safe launcher close:** while a phase is running, the unified launcher deliberately blocks its **Close** button, window **X**, and launcher-level Ctrl+C close request. Use **Abort / Safe Stop** inside the active phase GUI and wait for the phase to finish/release its COM ports before closing the launcher. The launcher never uses a force-kill as a substitute for the phase safety path.
 
 ```text
 START_NPG_CHAMBER.bat
@@ -332,7 +276,7 @@ A GUI window opens with:
 - a red **Close** button;
 - a status area.
 
-The scripts themselves still run in the CMD window so logs remain visible. For normal startup, enter the phase run names in the GUI. The DP-DBBA thickness ratio is reused automatically after Phase 01 if the launcher stayed open. Run-only automation parameters can be prepared before a phase starts; they are passed to that child process without rewriting the source files. If a script later needs a rare extra command or diagnostic input, type that in the CMD window.
+The scripts themselves still run in the CMD window so logs remain visible. For normal startup, enter the phase run names in the GUI. The DP-DBBA thickness ratio is recovered after Phase 01 and explicitly confirmed by the operator before every Phase 03 start. Run-only automation parameters can be prepared before a phase starts; they are passed to that child process without rewriting the source files. If a script later needs a rare extra command or diagnostic input, type that in the CMD window.
 
 If you press the red **Close** button while a phase is running, the launcher stops the running phase process and closes the GUI. The `START_NPG_CHAMBER.bat` window then exits automatically on normal close; you do not need to press any key.
 
@@ -355,7 +299,13 @@ When a phase is running, the launcher disables the phase buttons and the automat
 
 Each phase card has a **Run name** field. The launcher sends that value to the selected script before the script starts. This avoids typing the initial run name in CMD when using the GUI.
 
-The DP-DBBA phase no longer requires a visible ratio field during the normal sequence. After Phase 01 finishes, the launcher reads the saved `thickness_ratio` from the Heat up + Calibration summary file and stores it for the current GUI session. When Phase 03 starts, the launcher passes that ratio automatically to the DP-DBBA script. If the launcher was restarted, or if Phase 01 was not run first, then the launcher opens a small pop-up asking for the positive thickness ratio manually.
+The DP-DBBA phase no longer requires a permanently visible ratio field. After Phase 01 finishes, the launcher reads the saved `thickness_ratio` from the Heat up + Calibration summary file and stores it for the current GUI session. **Before every Phase 03 start, the launcher explicitly shows the stored ratio and asks the operator to confirm it.** Choosing **Yes** continues with that value; choosing **No** opens an editable ratio field before Phase 03 starts. If the launcher was restarted, Phase 01 was not run first, or no valid ratio was saved, the launcher asks the operator to enter a positive thickness ratio manually, as before.
+
+### Phase 01/03 shutter progression
+
+The shutter transition is deliberately simple and auditable. In Phase 01, `HEATING_UP` advances when the CK-1 temperature is at or above the requested target/guide **and** the averaged CK-1 QMB rate is at or above the requested rate target. In Phase 03, the same two CK-1 criteria apply after the external oven has satisfied its independent 200 °C stability requirement. Controller-only quantities such as the displayed control rate band, rate trend, temperature slope, cascade settling state and current headroom do **not** gate the shutter transition.
+
+The **Control rate band** shown in the Phase 01/03 live status belongs to feedback-control behavior only. A rate above its upper edge does not block `WAIT_SHUTTER_OPEN`.
 
 The CMD window still remains open for logs and for rare extra script prompts, such as diagnostic commands or fallback hardware values if a device cannot be read automatically.
 
@@ -365,7 +315,7 @@ The lavender **Change automatization parameters** button opens a maximizable edi
 
 - temperatures, deposition/rate targets and cycle counts;
 - sputtering, annealing, hold and wait durations;
-- Keysight ramp-up/ramp-down step sizes and periods;
+- Keysight ramp-up settings; Phase 01 also exposes its normal Finish ramp-down step/period;
 - the CK-1 ramp mode and temperature-slope targets;
 - CK-1 PID gains, PID period, band and correction limit;
 - the Phase 03 DP-DBBA sample-equivalent thickness target.
@@ -538,9 +488,10 @@ Typical outputs:
 Operator notes:
 
 - enter the run name in the launcher GUI before starting;
-- follow the script prompts;
-- check that the shutter and hardware state match the software state;
-- record the ratio for phase 3.
+- follow the script prompts and check that the shutter and hardware state match the software state;
+- **Finish phase** is the normal manual completion path: it enters the controlled Phase 01 `RAMP_DOWN`, reaches 0 A, switches the Keysight output OFF, saves the phase and closes only the Phase 01 process;
+- **Abort / safe stop** is intentionally immediate: it commands Keysight `CURR 0.000` and `OUTP OFF` before shutdown file I/O, then closes only Phase 01. The unified launcher remains open;
+- record the ratio for phase 3 when calibration completed normally.
 
 ---
 
@@ -641,7 +592,8 @@ Operator notes:
 - enter the run name in the launcher GUI; the calibration ratio is automatic after Phase 01, or requested by pop-up if the launcher does not know it;
 - verify the script target calculation before proceeding;
 - when the DP-DBBA target is reached, physically close the shutter and use **Close shutter** or **Finish phase** to confirm the normal handoff. **Finish phase** is blocked before the `WAIT_SHUTTER_CLOSE` stage;
-- **Abort / safe stop** remains a different action: it first commands and verifies an oven PID target of 0 °C, then performs the controlled Keysight ramp-down and switches its output off. If the PID write cannot be confirmed, the GUI reports that warning and still continues the electrical safe-stop sequence;
+- **Abort / safe stop** is intentionally immediate: it commands Keysight `CURR 0.000` and `OUTP OFF` first, then requests Oven PID `0 °C` on a best-effort basis and closes only Phase 03. A slow/failing PID transaction can therefore never delay removal of evaporator power;
+- **Finish phase** remains the normal handoff path: once `WAIT_SHUTTER_CLOSE` is reached and the shutter is physically closed, the script returns the Keysight to **0.640 A**, keeps `OUTPUT ON`, saves the run and closes only Phase 03 so Phase 04 can start from the intended thermal/electrical state;
 - after normal completion, proceed to NPG Annealings only after confirming the hardware state.
 
 ---
@@ -790,6 +742,8 @@ If a script aborts or exits with an error:
 
 The GUI will show a warning if a phase exits with a non-zero code.
 
+For Phases 01 and 03, **Abort / safe stop closes only the active phase process** after its hardware-safe action; it does not close the unified launcher. Phase 01 `Finish phase` uses its controlled ramp-down. Phase 03 `Finish phase` uses the normal 0.640 A / OUTPUT ON handoff to Phase 04.
+
 ---
 
 ## 19. Fallback to direct scripts
@@ -803,7 +757,6 @@ python npg_chamber\legacy_scripts\03_dp_dbba_evaporation_legacy.py
 python npg_chamber\legacy_scripts\04_npg_annealings_legacy.py
 ```
 
-The files in `original_scripts_backup/` are for recovery, not routine execution. They match the current runtime scripts when this package is released. Before restoring one later, compare its hash with `SOURCE_CODE_MANIFEST.json` and review `CHANGELOG.md` in case the active copy has subsequently been updated.
 
 ---
 
@@ -822,11 +775,6 @@ npg-chamber --version
 npg-chamber --list
 ```
 
-If installing from a wheel instead of the project folder:
-
-```bat
-python -m pip install npg_chamber-0.9.21-py3-none-any.whl
-```
 
 For development and laboratory iteration, editable mode is usually easier.
 
@@ -864,13 +812,13 @@ python -m pip install -e .
 
 ### GUI does not open
 
-In version `0.9.4`, the Tkinter startup-order issue that caused this message was fixed:
+A Tkinter startup-order failure can appear as:
 
 ```text
 Too early to create variable: no default root window
 ```
 
-If the GUI still does not open after updating to version `0.9.7` or later, use the text menu:
+If the GUI still does not open, use the text menu:
 
 ```bat
 npg-chamber --text-menu

@@ -19,7 +19,7 @@ def test_gui_launcher_has_requested_aesthetic_colors_and_inputs():
     assert '#ef4444' in text  # Close red
     assert 'Run name' in text
     assert 'Ratio source' in text
-    assert 'Automatic after Phase 01' in text
+    assert 'Phase 01 ratio will be confirmed before Phase 03' in text
     assert 'Thickness ratio required' in text
     assert 'NPG_CHAMBER_RUN_NAME' in text
     assert 'NPG_CHAMBER_THICKNESS_RATIO' in text
@@ -39,12 +39,16 @@ def test_gui_uses_light_background():
     assert '#f7f9fc' in text
 
 
-def test_close_button_stops_running_phase():
+def test_close_button_never_force_kills_running_phase():
     text = Path("npg_chamber/gui_launcher.py").read_text(encoding="utf-8")
+    runner = Path("npg_chamber/workflows/legacy_runner.py").read_text(encoding="utf-8")
     assert "command=self.request_close" in text
-    assert "terminate_process(process)" in text
     assert 'self.root.protocol("WM_DELETE_WINDOW", self.request_close)' in text
-    assert "Close requested: stopping the running phase process" in text
+    assert "Launcher close blocked while a phase is active" in text
+    assert "Use Abort / Safe Stop inside the phase GUI" in text
+    assert "terminate_process" not in text
+    assert "taskkill" not in runner
+    assert "def terminate_process" not in runner
 
 
 def test_gui_has_high_contrast_pastel_card_design():
@@ -87,7 +91,10 @@ def test_gui_has_run_only_automation_parameter_editor():
     assert "AUTOMATION_PARAMETERS_ENV" in text
     assert "encode_overrides" in text
     assert "Apply for this launcher run" in text
-    assert "hard safety limits are intentionally not editable" in text
+    assert "BASIC_PARAMETER_KEYS" in text
+    assert 'text="Basic controls"' in text
+    assert 'text="Expert mode  ▸"' in text
+    assert 'button.configure(text="Expert mode  ▾")' in text
 
 
 def test_gui_has_shared_pyrometer_profile_editor() -> None:
@@ -113,3 +120,158 @@ def test_launcher_exposes_persistent_full_chamber_automation_modes():
     assert "Save current as mode" in source
     assert "Load mode" in source
     assert "NPG_CHAMBER_AUTOMATION_MODE_NAME" in Path("npg_chamber/config/run_parameters.py").read_text(encoding="utf-8")
+
+
+
+def test_phase03_ratio_is_always_operator_confirmed_when_available() -> None:
+    text = Path("npg_chamber/gui_launcher.py").read_text(encoding="utf-8")
+    assert "Do you agree with the thickness ratio obtained?" in text
+    assert "Thickness ratio obtained in Phase 1:" in text
+    assert "Yes: continue with this ratio." in text
+    assert "No: modify the ratio before starting Phase 03." in text
+    assert "def _ask_manual_thickness_ratio(" in text
+    assert "operator-modified value before Phase 03" in text
+
+
+def test_phase03_ratio_confirmation_yes_reuses_phase1_value() -> None:
+    from npg_chamber.gui_launcher import NPGLauncherApp
+
+    class MessageBox:
+        def __init__(self):
+            self.prompt = None
+
+        def askyesno(self, title, prompt, **kwargs):
+            self.prompt = (title, prompt, kwargs)
+            return True
+
+    app = NPGLauncherApp.__new__(NPGLauncherApp)
+    app.root = object()
+    app.messagebox = MessageBox()
+    app.simpledialog = object()  # Must not be used on the Yes path.
+    app.session_thickness_ratio = 1.2345
+    app.session_ratio_source = "Phase 01"
+
+    assert app._get_or_ask_thickness_ratio() == 1.2345
+    assert app.messagebox.prompt is not None
+    assert "Thickness ratio obtained in Phase 1: 1.2345" in app.messagebox.prompt[1]
+
+
+def test_phase03_ratio_confirmation_no_allows_operator_replacement() -> None:
+    from npg_chamber.gui_launcher import NPGLauncherApp
+
+    class RatioStatus:
+        def __init__(self):
+            self.value = None
+
+        def set(self, value):
+            self.value = value
+
+    class MessageBox:
+        def askyesno(self, *args, **kwargs):
+            return False
+
+        def showerror(self, *args, **kwargs):
+            raise AssertionError("Valid replacement should not show an error")
+
+    class SimpleDialog:
+        def __init__(self):
+            self.kwargs = None
+
+        def askstring(self, *args, **kwargs):
+            self.kwargs = kwargs
+            return "2,75"
+
+    app = NPGLauncherApp.__new__(NPGLauncherApp)
+    app.root = object()
+    app.messagebox = MessageBox()
+    app.simpledialog = SimpleDialog()
+    app.dp_ratio_status_var = RatioStatus()
+    app.session_thickness_ratio = 1.2345
+    app.session_ratio_source = "Phase 01"
+
+    assert app._get_or_ask_thickness_ratio() == 2.75
+    assert app.session_thickness_ratio == 2.75
+    assert app.session_ratio_source == "operator-modified value before Phase 03"
+    assert app.simpledialog.kwargs["initialvalue"] == "1.2345"
+    assert "2.75" in app.dp_ratio_status_var.value
+
+
+def test_request_close_is_behaviorally_blocked_while_phase_process_runs() -> None:
+    import threading
+    from types import SimpleNamespace
+
+    from npg_chamber.gui_launcher import NPGLauncherApp
+
+    class RunningProcess:
+        def poll(self):
+            return None
+
+    class FakeRoot:
+        def __init__(self):
+            self.quit_called = False
+            self.destroy_called = False
+
+        def quit(self):
+            self.quit_called = True
+
+        def destroy(self):
+            self.destroy_called = True
+
+    warnings = []
+    statuses = []
+    app = NPGLauncherApp.__new__(NPGLauncherApp)
+    app.process_lock = threading.Lock()
+    app.current_process = RunningProcess()
+    app.running_key = "heat"
+    app.closing_requested = False
+    app.root = FakeRoot()
+    app.status_var = SimpleNamespace(set=statuses.append)
+    app.messagebox = SimpleNamespace(
+        showwarning=lambda title, message, parent=None: warnings.append((title, message, parent))
+    )
+
+    app.request_close()
+
+    assert app.closing_requested is False
+    assert app.root.quit_called is False
+    assert app.root.destroy_called is False
+    assert warnings and warnings[0][0] == "Phase still running"
+    assert "Abort / Safe Stop" in warnings[0][1]
+    assert statuses and "Close blocked" in statuses[-1]
+
+
+def test_request_close_closes_launcher_after_phase_has_finished() -> None:
+    import threading
+    from types import SimpleNamespace
+
+    from npg_chamber.gui_launcher import NPGLauncherApp
+
+    class FinishedProcess:
+        def poll(self):
+            return 0
+
+    class FakeRoot:
+        def __init__(self):
+            self.quit_called = False
+            self.destroy_called = False
+
+        def quit(self):
+            self.quit_called = True
+
+        def destroy(self):
+            self.destroy_called = True
+
+    app = NPGLauncherApp.__new__(NPGLauncherApp)
+    app.process_lock = threading.Lock()
+    app.current_process = FinishedProcess()
+    app.running_key = None
+    app.closing_requested = False
+    app.root = FakeRoot()
+    app.status_var = SimpleNamespace(set=lambda _value: None)
+    app.messagebox = SimpleNamespace(showwarning=lambda *args, **kwargs: None)
+
+    app.request_close()
+
+    assert app.closing_requested is True
+    assert app.root.quit_called is True
+    assert app.root.destroy_called is True

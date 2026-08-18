@@ -57,6 +57,16 @@ def test_hard_safety_limits_and_ports_are_not_editable() -> None:
     assert "xgs600_port" not in editable_keys
 
 
+
+def test_phase13_automatic_current_limits_keep_clearance_below_fixed_hard_stop() -> None:
+    for phase in ("heat", "dpdbba"):
+        specs = {spec.key: spec for spec in specs_for_phase(phase)}
+        defaults = all_default_values()[phase]
+        assert defaults["KEYSIGHT_SOFT_WARNING_A"] == pytest.approx(0.660)
+        assert specs["KEYSIGHT_SOFT_WARNING_A"].maximum == pytest.approx(0.675)
+        assert specs["KEYSIGHT_BASE_WORK_CURRENT_A"].maximum == pytest.approx(0.675)
+        assert specs["KEYSIGHT_START_CURRENT_A"].maximum == pytest.approx(0.675)
+
 def test_phase_relationship_validation() -> None:
     values = all_default_values()["sputter"]
     values["target_ar_pressure_mbar"] = 1e-4
@@ -188,6 +198,8 @@ def test_rate_control_safety_parameters_are_available_in_both_phases() -> None:
     expected = {
         "EVAPORATION_CONTROL_MODE",
         "RATE_CONTROL_MAX_TEMP_C",
+        "TEMP_WATCHDOG_MAX_TEMP_C",
+        "KEYSIGHT_SOFT_WARNING_A",
         "RATE_PID_SIGNAL_TIMEOUT_S",
         "RATE_PID_MAX_UP_STEP_A",
         "RATE_PID_MAX_DOWN_STEP_A",
@@ -195,3 +207,21 @@ def test_rate_control_safety_parameters_are_available_in_both_phases() -> None:
     }
     for phase in ("heat", "dpdbba"):
         assert expected <= {spec.key for spec in specs_for_phase(phase)}
+
+
+def test_phase_01_and_03_new_safety_defaults_and_relationships() -> None:
+    for phase in ("heat", "dpdbba"):
+        defaults = all_default_values()[phase]
+        assert defaults["RATE_CONTROL_MAX_TEMP_C"] == 250.0
+        assert defaults["TEMP_WATCHDOG_MAX_TEMP_C"] == 255.0
+        assert defaults["KEYSIGHT_SOFT_WARNING_A"] == 0.660
+
+        invalid = dict(defaults)
+        invalid["TEMP_WATCHDOG_MAX_TEMP_C"] = invalid["RATE_CONTROL_MAX_TEMP_C"]
+        with pytest.raises(ValueError, match="watchdog maximum temperature"):
+            validate_phase_values(phase, invalid)
+
+        invalid = dict(defaults)
+        invalid["KEYSIGHT_BASE_WORK_CURRENT_A"] = invalid["KEYSIGHT_SOFT_WARNING_A"] + 0.001
+        with pytest.raises(ValueError, match="maximum automatic current cap"):
+            validate_phase_values(phase, invalid)

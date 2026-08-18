@@ -2,7 +2,7 @@
 
 A mode stores the editable startup recipe for all four phases plus the shared
 pyrometer profile. Run names, sample-specific thickness ratios, COM ports and
-hard safety limits are intentionally not part of a saved mode.
+fixed equipment hard stops are intentionally not part of a saved mode. The approved run-level watchdog maximum and automatic-current cap are stored because they are editable startup parameters.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from npg_chamber.config.run_parameters import (
     validate_pyrometer_values,
 )
 
-MODE_STORE_VERSION = 3
+MODE_STORE_VERSION = 5
 PACKAGED_DEFAULT_MODE_NAME = "Packaged defaults"
 
 
@@ -33,8 +33,7 @@ def mode_store_path() -> Path:
 def _packaged_default_mode() -> dict[str, Any]:
     return {
         "description": (
-            "Factory project recipe. All editable values match the packaged "
-            "0.9.21 defaults."
+            "Factory project recipe. All editable values match the current packaged defaults."
         ),
         "phases": all_default_values(),
         "pyrometer": pyrometer_default_values(),
@@ -69,9 +68,12 @@ def validate_automation_mode(values: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"Automation mode phase {phase!r} must be a mapping")
         migrated_values = dict(raw_phase_values)
         if phase == "anneal":
-            # Version 0.9.20 removed the obsolete final 30 °C step. Older saved
-            # modes may still contain this key; discard it so they remain loadable.
+            # Older modes may still contain the obsolete final 30 °C step.
             migrated_values.pop("FINAL_VENT_TARGET_C", None)
+        if phase == "heat":
+            # Older modes may contain the removed historical ratio-comparison fields.
+            migrated_values.pop("CALIBRATION_REFERENCE_RATIO", None)
+            migrated_values.pop("CALIBRATION_RATIO_TOLERANCE_PERCENT", None)
         phases[phase] = validate_phase_values(phase, migrated_values)
     # Skipping Degas depends on the immediate history of one physical chamber
     # preparation. It is deliberately never persisted in a reusable recipe.

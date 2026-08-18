@@ -4,13 +4,32 @@ import json
 import serial
 import time
 from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
+import importlib.util
+import os
+import matplotlib
+
+# Phase 01/03 use the fast Qt dashboard by default.  Setting
+# NPG_CHAMBER_PHASE13_GUI=matplotlib keeps the previous GUI as a diagnostic
+# fallback.  Matplotlib remains available off-screen for snapshots/final PNGs.
+PHASE13_GUI_BACKEND = os.environ.get("NPG_CHAMBER_PHASE13_GUI", "qt").strip().lower()
+USE_QT_PHASE13_DASHBOARD = (
+    PHASE13_GUI_BACKEND not in {"matplotlib", "mpl", "legacy"}
+    and importlib.util.find_spec("PySide6") is not None
+    and importlib.util.find_spec("pyqtgraph") is not None
+)
+if USE_QT_PHASE13_DASHBOARD:
+    matplotlib.use("Agg")
+    plt = None
+    TextBox = None
+    Button = None
+else:
+    import matplotlib.pyplot as plt
+    from matplotlib.widgets import TextBox, Button
+
 import matplotlib.dates as mdates
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-from matplotlib.widgets import TextBox, Button
 from colorama import Fore, Style, init
-import os
 import re
 import math
 import atexit
@@ -18,8 +37,6 @@ import signal
 
 from npg_chamber.config.run_parameters import (
     apply_overrides_to_namespace,
-    format_override_summary,
-    format_pyrometer_summary,
     load_phase_overrides,
     load_pyrometer_settings,
     write_effective_parameters,
@@ -41,13 +58,30 @@ from npg_chamber.common.evaporation_control import (
     RatePidController,
     robust_rate_average,
 )
+from npg_chamber.common.professional_control import (
+    MOLECULE_PROFILE_FRESH,
+    CascadeConfig,
+    CascadeRateController,
+    ControlDecisionLogger,
+    DataQualityEventLogger,
+    QmbGuardConfig,
+    QmbSignalGuard,
+    StableBandTracker,
+    StableConditionTracker,
+    TemperaturePidConfig,
+    TemperaturePidController,
+    exact_calibration_ratio,
+    robust_linear_slope,
+    robust_median,
+    robust_rate_from_thickness,
+)
 
 RUN_AUTOMATION_OVERRIDES = load_phase_overrides("heat")
 
+# Monitoring-only pyrometer: displayed/logged, never used for control or safety decisions.
 PYROMETER_SETTINGS = load_pyrometer_settings()
 PYROMETER_PROFILE = PyrometerProfile(**PYROMETER_SETTINGS)
 PYROMETER_SERIAL_CONFIG = PyrometerSerialConfig(port="COM10", baudrate=38400, address="00")
-print("\n" + format_pyrometer_summary(PYROMETER_SETTINGS) + "\n")
 
 
 def _resolve_phase_data_parent(phase_folder_name: str) -> str:
@@ -96,7 +130,6 @@ try:
     with open(pyrometer_profile_path, "w", encoding="utf-8") as pyrometer_profile_file:
         json.dump(PYROMETER_SETTINGS, pyrometer_profile_file, indent=2, sort_keys=True)
         pyrometer_profile_file.write("\n")
-    print(f"Saved pyrometer profile: {pyrometer_profile_path}")
 except Exception as exc:
     print(f"Could not save pyrometer profile: {exc}")
 
@@ -117,103 +150,6 @@ except Exception as exc:
     print(f"Could not initialize pyrometer CSV: {exc}")
 
 
-# _____________________WHAT CHANGED IN THIS VERSION________________________
-WHAT_CHANGED_TEXT = """WHAT CHANGED IN THIS CLEAN VERSION
-============================================================
-This build starts again from the simpler Heat up + Calibration script and
-keeps the automation logic explicit and easier to maintain. It also adds the
-monitoring-only IMPAC IPE 140 profile, logging and three-way temperature view;
-no pyrometer value is used by the heating, PID, Keysight or safety logic.
-
-Main changes in this clean build:
-1. The normal current ceiling is now KEYSIGHT_SOFT_WARNING_A = 0.670 A.
-   All normal current commands are clamped there, including assist boost.
-2. The old KEYSIGHT_MAX_CURRENT_A and KEYSIGHT_OCP_A duplication was removed.
-   There is now a single hard current protection value:
-      KEYSIGHT_HARD_STOP_A = 0.685 A
-3. The Keysight hardware OCP latch is now deliberately above the software hard stop:
-      KEYSIGHT_HARD_STOP_A       = 0.685 A  # software measured-current stop
-      KEYSIGHT_INSTRUMENT_OCP_MARGIN_A = 0.005 A
-      KEYSIGHT_INSTRUMENT_OCP_A        = round(KEYSIGHT_HARD_STOP_A + KEYSIGHT_INSTRUMENT_OCP_MARGIN_A, 3)
-   This avoids nuisance OCP trips from small transients/readback tolerances near 0.670 A.
-4. The Keysight voltage setpoint limit, software emergency stop, and hardware OVP latch
-   are now separate concepts:
-      KEYSIGHT_VOLTAGE_LIMIT_V   = 2.30 V   # normal compliance limit
-      KEYSIGHT_HARD_STOP_V       = 2.45 V   # software measured-voltage stop
-      KEYSIGHT_INSTRUMENT_OVP_MARGIN_V = 0.05 V
-      KEYSIGHT_INSTRUMENT_OVP_V        = KEYSIGHT_HARD_STOP_V + KEYSIGHT_INSTRUMENT_OVP_MARGIN_V
-   The normal voltage limit no longer acts as the OVP trip level.
-5. A selectable ramp-up mode is kept in the GUI:
-      - Steps ramp up mode: fixed +0.005 A steps during the approach.
-      - Slope ramp up mode: CK-1 temperature-slope controller during the approach.
-   Once the CK-1 reaches the editable temperature target band, a PID temperature
-   hold takes over and keeps regulating the Keysight current around that target.
-6. The steps-ramp threshold temperature and step period can be edited live.
-7. The CK-1 temperature and rate plots now autoscale from their measured data,
-   so the early low-temperature/rate changes are visible instead of being
-   compressed by distant target reference lines.
-8. The calibration target reached message is now a proper WAIT_SHUTTER_CLOSE
-   phase. RAMP_DOWN starts only after pressing Close Shutter.
-9. The final thickness ratio is now calculated as:
-      CK-1 relative thickness / Sample relative thickness
-10. The heating-to-open-shutter transition no longer blocks when the CK-1
-    average rate is above the upper rate band. It requires temperature target
-    reached and average rate >= target rate.
-11. Saved phase snapshots are now graph-only Matplotlib images. They do not
-    include the side control panel, GUI buttons, desktop, or full screen.
-12. A temperature watchdog was added as an independent safety layer above the
-    PID. It can force current down near a thermal limit and hard-stop the
-    Keysight if the CK-1 temperature, sensor freshness, or sensor values are unsafe.
-13. Saved PNG plots now use the same line colours as the live interface.
-14. Dependent setpoints are now expressed as formulas where appropriate:
-    CK-1 rate low/high follow the editable target rate, and instrument
-    OCP/OVP follow their corresponding software hard-stop values.
-15. The right control-panel titles and Last action area were moved slightly
-    upward to avoid visual collisions with the operator buttons.
-
-Default working values in this version:
-- KEYSIGHT_START_CURRENT_A = 0.005
-- KEYSIGHT_BASE_WORK_CURRENT_A = 0.640
-- KEYSIGHT_SOFT_WARNING_A = 0.670
-- KEYSIGHT_HARD_STOP_A = 0.685
-- KEYSIGHT_INSTRUMENT_OCP_MARGIN_A = 0.005
-- KEYSIGHT_INSTRUMENT_OCP_A = 0.690
-- KEYSIGHT_VOLTAGE_LIMIT_V = 2.30
-- KEYSIGHT_HARD_STOP_V = 2.45
-- KEYSIGHT_INSTRUMENT_OVP_MARGIN_V = 0.05
-- KEYSIGHT_INSTRUMENT_OVP_V = 2.50
-- STEPS_RAMP_UNTIL_TEMP_C = 100.0
-- STEPS_RAMP_STEP_PERIOD_S = 15.0
-- KEYSIGHT_STEP_A = 0.005
-- HEATING_TRIGGER_TEMP_C = 242.0
-- CK1_RATE_TARGET_A_PER_S = 0.40
-- CK1_RATE_AVG_WINDOW_POINTS = 8
-- CALIBRATION_TARGET_SAMPLE_A = 1.0
-- TEMP_SLOPE_WINDOW_POINTS = 15
-- TEMP_SLOPE_TARGET_EARLY_C_PER_MIN = 9.0
-- TEMP_SLOPE_TARGET_MID_C_PER_MIN = 8.0
-- TEMP_SLOPE_TARGET_LATE_C_PER_MIN = 7.0
-- RAMPDOWN_STEP_PERIOD_S = 15
-
-Notes for this build:
-- The soft current cap is an active normal-operation cap, not just a warning.
-- The old absolute-temperature ramp-down protection is replaced by an independent
-  target-relative temperature watchdog.
-- Temperature stabilization is handled by the PID hold around the editable target.
-- The watchdog remains active even if the PID calculation fails or stops correcting.
-- The software hard current/voltage values are still checked from live readback.
-- The instrument OCP/OVP latch values include margin so the Keysight does not
-  switch itself off from tiny transients just below the software thresholds.
-- Review and tune PID values on safe test conditions before running on hardware.
-"""
-
-
-def show_what_changed():
-    print("\n" + WHAT_CHANGED_TEXT + "\n")
-
-
-show_what_changed()
-
 
 init()
 stop_event = threading.Event()
@@ -233,19 +169,25 @@ atexit.register(pressure_emergency_alarm.close)
 # _____________________AUTOMATION PARAMETERS____________________________________
 AUTO_KEYSIGHT_ENABLED = True
 
-# Start from a small non-zero current and ramp upward under software control.
+# The requested first ramp setpoint remains 0.005 A, but the instrument is
+# first enabled and verified at exactly 0 A. One retry is allowed before
+# startup fails safely, keeping the sequence deterministic and simple.
 KEYSIGHT_START_CURRENT_A = 0.005
+KEYSIGHT_STARTUP_ZERO_CURRENT_A = 0.0
+KEYSIGHT_STARTUP_ENABLE_ATTEMPTS = 2
+KEYSIGHT_STARTUP_VERIFY_DELAY_S = 0.50
+KEYSIGHT_OUTPUT_OFF_CONFIRM_DELAY_S = 0.20
 KEYSIGHT_BASE_WORK_CURRENT_A = 0.640
 
 # Normal operation cap: the automation must never command above this value.
-KEYSIGHT_SOFT_WARNING_A = 0.670
+KEYSIGHT_SOFT_WARNING_A = 0.660
 
 # Software hard current safety value. The script stops if measured current reaches this.
-KEYSIGHT_HARD_STOP_A = 0.685
+KEYSIGHT_HARD_STOP_A = 0.680
 
 # Hardware latch protection in the Keysight. Keep this above the software hard stop
 # to avoid nuisance OCP trips from short transients/readback tolerances while the
-# script is intentionally operating near the 0.670 A soft cap.
+# script is intentionally operating near the 0.660 A soft cap.
 KEYSIGHT_INSTRUMENT_OCP_MARGIN_A = 0.005
 KEYSIGHT_INSTRUMENT_OCP_A = KEYSIGHT_HARD_STOP_A + KEYSIGHT_INSTRUMENT_OCP_MARGIN_A
 
@@ -268,7 +210,7 @@ PID_CONTROL_PERIOD_S = 8.0
 PID_TEMP_BAND_C = 1.0
 PID_KP_A_PER_C = 0.0020
 PID_KI_A_PER_C_S = 0.000030
-PID_KD_A_PER_C_PER_S = 0.0030
+PID_KD_A_PER_C_PER_S = 0.0
 PID_MAX_STEP_A = 0.0025
 PID_INTEGRAL_LIMIT_C_S = 250.0
 
@@ -281,18 +223,55 @@ EVAPORATION_CONTROL_MODE = CONTROL_MODE_TEMPERATURE
 RATE_CONTROL_MAX_TEMP_C = 250.0
 RATE_PID_MIN_CONTROL_TEMP_C = 150.0
 RATE_PID_ACTIVATION_A_PER_S = 0.05
-RATE_PID_FILTER_POINTS = 7
-RATE_PID_READY_STABLE_READS = 6
-RATE_PID_CONTROL_PERIOD_S = 8.0
-RATE_PID_DEADBAND_A_PER_S = 0.02
+RATE_PID_FILTER_POINTS = 11
+RATE_PID_CONTROL_PERIOD_S = 60.0
+RATE_PID_DEADBAND_A_PER_S = 0.03
 RATE_PID_KP_A_PER_RATE = 0.020
 RATE_PID_KI_A_PER_THICKNESS = 0.00020
 RATE_PID_KD_A_PER_RATE_SLOPE = 0.0
-RATE_PID_MAX_UP_STEP_A = 0.002
-RATE_PID_MAX_DOWN_STEP_A = 0.005
+RATE_PID_MAX_UP_STEP_A = 0.0010
+RATE_PID_MAX_DOWN_STEP_A = 0.0015
 RATE_PID_INTEGRAL_LIMIT_THICKNESS_A = 25.0
 RATE_PID_SIGNAL_TIMEOUT_S = 30.0
 COMPOUND_TEMP_GUARD_BAND_C = 5.0
+
+# Professional signal estimation and true cascade control.
+MOLECULE_CONDITION_PROFILE = 'normal'
+FRESH_PROFILE_INITIAL_TARGET_OFFSET_C = -4.0
+FRESH_PROFILE_CASCADE_KI_SCALE = 0.0
+CONTROL_TEMPERATURE_FILTER_POINTS = 5
+RATE_ESTIMATOR_WINDOW_S = 60.0
+RATE_ESTIMATOR_MIN_POINTS = 30
+RATE_ESTIMATOR_MIN_SPAN_S = 45.0
+RATE_ESTIMATOR_MIN_R2 = 0.80
+QMB_MAX_ABS_RATE_A_PER_S = 10.0
+QMB_MAX_DERIVED_THICKNESS_RATE_A_PER_S = 10.0
+QMB_MIN_ALLOWED_THICKNESS_JUMP_A = 5.0
+RATE_CONTROL_SETTLING_S = 180.0
+CASCADE_INNER_READY_TEMP_BAND_C = 0.75
+CASCADE_INNER_MAX_ABS_TEMP_SLOPE_C_PER_MIN = 0.30
+CASCADE_INNER_READY_STABLE_DURATION_S = 60.0
+CASCADE_THERMAL_RESPONSE_MAX_HOLD_S = 420.0
+CASCADE_RATE_KP_C_PER_RATE = 1.5
+CASCADE_RATE_KI_C_PER_THICKNESS = 0.0025
+CASCADE_MAX_TARGET_UP_C_PER_MIN = 0.40
+CASCADE_MAX_TARGET_DOWN_C_PER_MIN = 0.40
+CASCADE_MAX_TARGET_STEP_C = 1.0
+FRESH_PROFILE_MAX_TARGET_STEP_C = 0.75
+CASCADE_TARGET_TRIM_LIMIT_C = 8.0
+CASCADE_INTEGRAL_LIMIT_THICKNESS_A = 20.0
+CASCADE_TREND_HOLD_THRESHOLD_A_PER_S2 = 0.0005
+RATE_ESTIMATE_TREND_WINDOW_S = 180.0
+RATE_ESTIMATE_TREND_MIN_POINTS = 3
+FAST_RATE_EXCURSION_FACTOR = 1.75
+FAST_RATE_EXCURSION_DURATION_S = 20.0
+FAST_RATE_EXCURSION_CURRENT_STEP_A = 0.0010
+
+# Professional temperature PID details. Safety continues to use raw readings.
+PID_INTEGRAL_ACTIVE_ERROR_C = 5.0
+PID_DERIVATIVE_FILTER_TAU_S = 20.0
+PID_MAX_UP_SLEW_A_PER_MIN = 0.01875
+PID_MAX_DOWN_SLEW_A_PER_MIN = 0.01875
 
 # Independent temperature watchdog.
 # This is intentionally separate from the PID: if the PID misbehaves, stops
@@ -301,7 +280,7 @@ COMPOUND_TEMP_GUARD_BAND_C = 5.0
 TEMP_WATCHDOG_ENABLED = True
 TEMP_WATCHDOG_PERIOD_S = 5.0
 TEMP_WATCHDOG_SOFT_MARGIN_C = 5.0       # target + this value => force current down
-TEMP_WATCHDOG_HARD_MARGIN_C = 10.0      # target + this value => output OFF / SAFETY_STOP
+TEMP_WATCHDOG_MAX_TEMP_C = 255.0        # absolute CK-1 temperature => output OFF / SAFETY_STOP
 TEMP_WATCHDOG_SOFT_STEP_A = 0.010       # forced current reduction per soft action
 TEMP_WATCHDOG_SOFT_COOLDOWN_S = 0.50     # forced current reduction per hard action
 TEMP_WATCHDOG_SENSOR_STALE_TIMEOUT_S = 180.0 # time that can pass without receiving inputs of the CK-1 Temp
@@ -329,6 +308,8 @@ CK1_RATE_AVG_WINDOW_POINTS = 8
 # The goal is not to make current linear in time, but to keep temperature
 # approximately linear in time while approaching the working current safely.
 TEMP_SLOPE_WINDOW_POINTS = 15
+TEMP_SLOPE_WINDOW_S = 45.0
+TEMP_SLOPE_MIN_SPAN_S = 20.0
 TEMP_SLOPE_TARGET_EARLY_C_PER_MIN = 9.0
 TEMP_SLOPE_TARGET_MID_C_PER_MIN = 8.0
 TEMP_SLOPE_TARGET_LATE_C_PER_MIN = 7.0
@@ -342,54 +323,224 @@ LATE_RAMP_MAX_STEP_A = 0.005
 
 
 CALIBRATION_TARGET_SAMPLE_A = 1.0
+# Calibration quality is based on synchronized QMB linearity and exact target crossing.
+CALIBRATION_MIN_LINEAR_R2 = 0.985
 RAMPDOWN_STEP_A = 0.010
 RAMPDOWN_STEP_PERIOD_S = 15
 RAMPDOWN_ZERO_THRESHOLD_A = 0.003
 
 # Apply validated launcher values only inside this child process. The packaged
-# defaults and source files are not modified. Hard safety limits are deliberately
-# absent from the editable parameter schema.
+# defaults and source files are not modified. Fixed equipment hard stops remain
+# outside the editor; the approved run-level watchdog maximum and current cap are editable.
 apply_overrides_to_namespace("heat", globals(), RUN_AUTOMATION_OVERRIDES)
 KEYSIGHT_INSTRUMENT_OCP_A = KEYSIGHT_HARD_STOP_A + KEYSIGHT_INSTRUMENT_OCP_MARGIN_A
 KEYSIGHT_INSTRUMENT_OVP_V = KEYSIGHT_HARD_STOP_V + KEYSIGHT_INSTRUMENT_OVP_MARGIN_V
 CK1_RATE_LOW_A_PER_S = CK1_RATE_TARGET_A_PER_S - 0.05
 CK1_RATE_HIGH_A_PER_S = CK1_RATE_TARGET_A_PER_S + 0.05
 
+def fresh_molecule_profile_active():
+    return str(MOLECULE_CONDITION_PROFILE).strip().lower() == MOLECULE_PROFILE_FRESH
+
+
+def effective_rate_settling_s():
+    # The post-refill dataset showed about 156 s from current-slope changes to
+    # temperature-slope response and about 177 s to rate response.  Never let
+    # the outer loop act again before that delayed response can be observed.
+    base = max(float(RATE_CONTROL_SETTLING_S), 180.0)
+    return max(base, 240.0) if fresh_molecule_profile_active() else base
+
+
+def effective_cascade_inner_ready_stable_s():
+    base = max(0.0, float(CASCADE_INNER_READY_STABLE_DURATION_S))
+    return max(base, 120.0) if fresh_molecule_profile_active() else base
+
+
+def effective_cascade_thermal_hold_max_s():
+    base = max(60.0, float(CASCADE_THERMAL_RESPONSE_MAX_HOLD_S))
+    return max(base, 600.0) if fresh_molecule_profile_active() else base
+
+
+def effective_rate_deadband():
+    return max(float(RATE_PID_DEADBAND_A_PER_S), 0.04) if fresh_molecule_profile_active() else float(RATE_PID_DEADBAND_A_PER_S)
+
+
+def effective_cascade_up_slew():
+    return float(CASCADE_MAX_TARGET_UP_C_PER_MIN) * (0.50 if fresh_molecule_profile_active() else 1.0)
+
+
+def effective_cascade_down_slew():
+    return float(CASCADE_MAX_TARGET_DOWN_C_PER_MIN) * (0.50 if fresh_molecule_profile_active() else 1.0)
+
+
+def effective_cascade_step_c():
+    if fresh_molecule_profile_active():
+        return min(float(CASCADE_MAX_TARGET_STEP_C), float(FRESH_PROFILE_MAX_TARGET_STEP_C))
+    return float(CASCADE_MAX_TARGET_STEP_C)
+
+
+def effective_cascade_inner_temp_slope_limit_c_per_min():
+    """Return the controller-internal thermal-stability limit for cascade handover.
+
+    This threshold belongs only to the compound controller's inner-loop
+    qualification.  It is deliberately independent from the experimental
+    shutter-opening criteria.
+    """
+    base = float(CASCADE_INNER_MAX_ABS_TEMP_SLOPE_C_PER_MIN)
+    return min(base, 0.20) if fresh_molecule_profile_active() else base
+
+
+def effective_cascade_trim():
+    return min(float(CASCADE_TARGET_TRIM_LIMIT_C), 5.0) if fresh_molecule_profile_active() else float(CASCADE_TARGET_TRIM_LIMIT_C)
+
+
+def effective_cascade_ki():
+    scale = float(FRESH_PROFILE_CASCADE_KI_SCALE) if fresh_molecule_profile_active() else 1.0
+    return float(CASCADE_RATE_KI_C_PER_THICKNESS) * max(0.0, min(scale, 1.0))
+
+
+def initial_cascade_target_c(current_temp=None):
+    guide = float(HEATING_TRIGGER_TEMP_C)
+    live_target_getter = globals().get('get_heating_trigger_temp_c')
+    if callable(live_target_getter):
+        try:
+            guide = float(live_target_getter())
+        except Exception:
+            pass
+    if not fresh_molecule_profile_active():
+        return guide
+    target = guide + min(0.0, float(FRESH_PROFILE_INITIAL_TARGET_OFFSET_C))
+    target = max(0.0, min(target, float(RATE_CONTROL_MAX_TEMP_C)))
+    if current_temp is not None:
+        # Never command an upward jump above the data-tuned fresh start point.
+        # If handover occurs hotter, begin cooling from the lower target.
+        target = min(float(current_temp), target)
+    return target
+
+
 rate_pid_controller = RatePidController(
     RatePidConfig(
         kp_a_per_rate=RATE_PID_KP_A_PER_RATE,
         ki_a_per_thickness=RATE_PID_KI_A_PER_THICKNESS,
         kd_a_per_rate_slope=RATE_PID_KD_A_PER_RATE_SLOPE,
-        deadband_rate=RATE_PID_DEADBAND_A_PER_S,
-        max_up_step_a=RATE_PID_MAX_UP_STEP_A,
-        max_down_step_a=RATE_PID_MAX_DOWN_STEP_A,
+        deadband_rate=effective_rate_deadband(),
+        max_up_step_a=RATE_PID_MAX_UP_STEP_A * (0.5 if fresh_molecule_profile_active() else 1.0),
+        max_down_step_a=RATE_PID_MAX_DOWN_STEP_A * (2.0 / 3.0 if fresh_molecule_profile_active() else 1.0),
         integral_limit_thickness=RATE_PID_INTEGRAL_LIMIT_THICKNESS_A,
         min_current_a=0.0,
         max_current_a=KEYSIGHT_SOFT_WARNING_A,
     )
 )
+
+temperature_pid_controller = TemperaturePidController(
+    TemperaturePidConfig(
+        kp=PID_KP_A_PER_C,
+        ki=PID_KI_A_PER_C_S,
+        kd=PID_KD_A_PER_C_PER_S,
+        deadband_c=PID_TEMP_BAND_C,
+        integral_limit_c_s=PID_INTEGRAL_LIMIT_C_S,
+        integral_active_error_c=PID_INTEGRAL_ACTIVE_ERROR_C,
+        derivative_tau_s=PID_DERIVATIVE_FILTER_TAU_S,
+        max_up_slew_a_per_min=PID_MAX_UP_SLEW_A_PER_MIN,
+        max_down_slew_a_per_min=PID_MAX_DOWN_SLEW_A_PER_MIN,
+        min_current_a=0.0,
+        max_current_a=KEYSIGHT_SOFT_WARNING_A,
+    )
+)
+
+cascade_rate_controller = CascadeRateController(
+    CascadeConfig(
+        kp_c_per_rate=CASCADE_RATE_KP_C_PER_RATE,
+        ki_c_per_thickness=effective_cascade_ki(),
+        deadband_rate=effective_rate_deadband(),
+        integral_limit_thickness=CASCADE_INTEGRAL_LIMIT_THICKNESS_A,
+        max_up_c_per_min=effective_cascade_up_slew(),
+        max_down_c_per_min=effective_cascade_down_slew(),
+        trim_limit_c=effective_cascade_trim(),
+        settling_s=effective_rate_settling_s(),
+        trend_hold_threshold_per_s=CASCADE_TREND_HOLD_THRESHOLD_A_PER_S2,
+        temperature_guard_band_c=COMPOUND_TEMP_GUARD_BAND_C,
+        max_step_c=effective_cascade_step_c(),
+    )
+)
+cascade_rate_controller.reset(base_target_c=HEATING_TRIGGER_TEMP_C, current_target_c=initial_cascade_target_c(), now_s=time.monotonic())
+cascade_inner_ready_tracker = StableConditionTracker(effective_cascade_inner_ready_stable_s())
+
 rate_pid_state = {
     'activated': False,
     'activated_at': None,
     'last_filtered_rate_a_per_s': None,
     'last_rate_timestamp': None,
-    'last_ready_sample_timestamp': None,
-    'ready_stable_reads': 0,
     'last_log_at': 0.0,
     'hard_stop_triggered': False,
+    'last_control_action_at': 0.0,
+    'last_outer_action_at': 0.0,
+    'last_rate_estimate': None,
+    'last_rate_estimate_value': None,
+    'last_rate_estimate_sample_timestamp': None,
+    'last_valid_estimate_at': None,
+    'fast_excursion_since': None,
+    'last_fast_guard_action_at': 0.0,
+    'last_outer_delta_c': 0.0,
+    'last_outer_target_c': None,
+    'cascade_inner_ready': False,
+    'cascade_inner_ready_elapsed_s': 0.0,
+    'cascade_thermal_response_pending': False,
+    'cascade_outer_freeze_reason': 'Waiting for inner temperature-loop qualification.',
+    'cascade_temp_slope_c_per_min': None,
+    'cascade_rate_trend_a_per_s2': None,
 }
 feedback_control_state = {
     'active_controller': 'Warm-up ramp',
     'last_change_at': time.time(),
+    'active_temperature_target_c': HEATING_TRIGGER_TEMP_C,
 }
-print("\n" + format_override_summary("heat", RUN_AUTOMATION_OVERRIDES) + "\n")
+
+control_history_lock = threading.Lock()
+control_signal_history = {
+    'thickness_times': [],
+    'thickness_data': [],
+    'rate_times': [],
+    'rate_data': [],
+    'estimated_rate_times': [],
+    'estimated_rate_data': [],
+}
+control_decision_logger = ControlDecisionLogger(
+    os.path.join(final_folder_path, f"{safe_sample_name}_control_decisions.csv")
+)
+qmb_guard_config = QmbGuardConfig(
+    max_abs_rate_a_per_s=QMB_MAX_ABS_RATE_A_PER_S,
+    max_thickness_rate_a_per_s=QMB_MAX_DERIVED_THICKNESS_RATE_A_PER_S,
+    min_allowed_thickness_jump_a=QMB_MIN_ALLOWED_THICKNESS_JUMP_A,
+)
+data_quality_event_logger = DataQualityEventLogger(
+    os.path.join(final_folder_path, f"{safe_sample_name}_data_quality_events.csv")
+)
+
+
+def record_qmb_rejection(device_name, signal_name, raw_value, decision):
+    ts, formatted, dec = log_timestamp()
+    message = (
+        f"QMB DATA REJECTED | {device_name} {signal_name}: {raw_value!r} | "
+        f"{decision.reason}"
+    )
+    print(f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - {Fore.YELLOW}{message}{Style.RESET_ALL}")
+    data_quality_event_logger.log(
+        timestamp=ts.isoformat(),
+        device=device_name,
+        signal=signal_name,
+        raw_value=raw_value,
+        reason=decision.reason,
+        previous_value=decision.previous_value,
+        elapsed_s=decision.elapsed_s,
+        derived_rate_a_per_s=decision.derived_rate_a_per_s,
+    )
+
 try:
     parameter_record_path = write_effective_parameters(
         os.path.join(final_folder_path, f"{safe_sample_name}_automation_parameters.json"),
         "heat",
         RUN_AUTOMATION_OVERRIDES,
     )
-    print(f"Saved effective automation parameters: {parameter_record_path}")
 except Exception as exc:
     print(f"Could not save effective automation parameters: {exc}")
 
@@ -402,16 +553,20 @@ keysight_state = {
     'set_voltage_limit_v': KEYSIGHT_VOLTAGE_LIMIT_V,
     'last_step_at': None,
     'reason_stopped': None,
+    'startup_in_progress': False,
+    'startup_verified': False,
+    'startup_attempts': 0,
+    'startup_error': None,
+    'startup_verified_at': None,
 
     'last_soft_cap_warning_at': 0.0,
     'last_voltage_limit_guard_at': 0.0,
 }
 
 temperature_pid_state = {
-    'integral_error_c_s': 0.0,
-    'last_error_c': None,
-    'last_time': None,
     'last_log_at': 0.0,
+    'last_target_c': HEATING_TRIGGER_TEMP_C,
+    'last_mode': None,
 }
 
 temperature_watchdog_state = {
@@ -431,6 +586,10 @@ process_state = {
     'transition_reason': None,
     'baseline_ck1_thickness': None,
     'baseline_sample_thickness': None,
+    'baseline_ck1_time': None,
+    'baseline_sample_time': None,
+    'calibration_result': None,
+    'calibration_quality_status': 'not evaluated',
     'shutter_open_confirmed': False,
     'shutter_close_confirmed': False,
     'last_status_print': 0.0,
@@ -477,6 +636,7 @@ device_info = {
     'Arduino CK-1 crucible temperature': {'port': 'COM3', 'baud_rate': 9600},
 }
 QMBs = {'CK-1 evaporator QMB', 'Sample QMB'}
+qmb_signal_guards = {name: QmbSignalGuard(qmb_guard_config) for name in QMBs}
 timeout = 1
 
 data = {
@@ -544,72 +704,88 @@ TEMPERATURE_TITLE_PAD = 4
 TEMPERATURE_SELECTOR_LIFT = 0.040
 
 # _____________________PLOTS____________________________________________________
-fig, ((ax_thickness_ck1, ax_rate_ck1, ax_pressure_xgs600),
-      (ax_thickness_sample, ax_rate_sample, ax_temperature_oven),
-      (ax_current_keysight, ax_voltage_keysight, ax_temperature_ck1)) = plt.subplots(3, 3, figsize=(19.2, 11.2))
-fig.patch.set_facecolor('#f4f6f8')
-# A larger vertical gap gives every graph title its own header space and keeps
-# the temperature selector clear of the plots above and below it.
-plt.subplots_adjust(left=0.052, right=0.685, top=0.875, bottom=0.075, hspace=0.68, wspace=0.30)
-plt.ion()
+# The fast Qt dashboard does not need a second 3x3 Matplotlib live canvas. Keep a
+# tiny off-screen canvas only for legacy helper calls; report/snapshot figures are
+# still created at full resolution when they are actually saved.
+if USE_QT_PHASE13_DASHBOARD:
+    fig = Figure(figsize=(1.0, 1.0))
+    FigureCanvas(fig)
+    ax_thickness_ck1 = ax_rate_ck1 = ax_pressure_xgs600 = None
+    ax_thickness_sample = ax_rate_sample = ax_temperature_oven = None
+    ax_current_keysight = ax_voltage_keysight = ax_temperature_ck1 = None
+    line_thickness_ck1 = line_rate_ck1 = None
+    line_thickness_sample = line_rate_sample = None
+    line_pressure_xgs600 = line_temperature_oven = None
+    line_current_keysight = line_voltage_keysight = line_temperature_ck1 = None
+    phase_title_text = None
+    axis_info_texts = {}
+else:
+    fig, ((ax_thickness_ck1, ax_rate_ck1, ax_pressure_xgs600),
+          (ax_thickness_sample, ax_rate_sample, ax_temperature_oven),
+          (ax_current_keysight, ax_voltage_keysight, ax_temperature_ck1)) = plt.subplots(3, 3, figsize=(19.2, 11.2))
+    fig.patch.set_facecolor('#f4f6f8')
+    # A larger vertical gap gives every graph title its own header space and keeps
+    # the temperature selector clear of the plots above and below it.
+    plt.subplots_adjust(left=0.052, right=0.685, top=0.875, bottom=0.075, hspace=0.68, wspace=0.30)
+    plt.ion()
 
-line_thickness_ck1, = ax_thickness_ck1.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['ck1'])
-line_rate_ck1, = ax_rate_ck1.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['ck1'])
-line_thickness_sample, = ax_thickness_sample.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['sample'])
-line_rate_sample, = ax_rate_sample.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['sample'])
-line_pressure_xgs600, = ax_pressure_xgs600.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['pressure'])
-line_temperature_oven, = ax_temperature_oven.plot([], [], linewidth=2.0, color=TEMPERATURE_VIEW_STYLES['oven']['accent'])
-line_current_keysight, = ax_current_keysight.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['current'])
-line_voltage_keysight, = ax_voltage_keysight.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['voltage'])
-line_temperature_ck1, = ax_temperature_ck1.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['ck1_temperature'])
+    line_thickness_ck1, = ax_thickness_ck1.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['ck1'])
+    line_rate_ck1, = ax_rate_ck1.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['ck1'])
+    line_thickness_sample, = ax_thickness_sample.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['sample'])
+    line_rate_sample, = ax_rate_sample.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['sample'])
+    line_pressure_xgs600, = ax_pressure_xgs600.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['pressure'])
+    line_temperature_oven, = ax_temperature_oven.plot([], [], linewidth=2.0, color=TEMPERATURE_VIEW_STYLES['oven']['accent'])
+    line_current_keysight, = ax_current_keysight.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['current'])
+    line_voltage_keysight, = ax_voltage_keysight.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['voltage'])
+    line_temperature_ck1, = ax_temperature_ck1.plot([], [], linewidth=2.0, color=AXIS_ACCENTS['ck1_temperature'])
 
-AXIS_INFO_STYLE = dict(
-    boxstyle='round,pad=0.28',
-    facecolor='#f8fafc',
-    edgecolor='#d6dee8',
-    linewidth=0.9,
-    alpha=0.96,
-)
+    AXIS_INFO_STYLE = dict(
+        boxstyle='round,pad=0.28',
+        facecolor='#f8fafc',
+        edgecolor='#d6dee8',
+        linewidth=0.9,
+        alpha=0.96,
+    )
 
-plot_axes_config = [
-    (ax_thickness_ck1, 'CK-1 QMB thickness', 'Thickness (Å)', AXIS_ACCENTS['ck1']),
-    (ax_rate_ck1, 'CK-1 QMB rate', 'Rate (Å/s)', AXIS_ACCENTS['ck1']),
-    (ax_thickness_sample, 'Sample QMB thickness', 'Thickness (Å)', AXIS_ACCENTS['sample']),
-    (ax_rate_sample, 'Sample QMB rate', 'Rate (Å/s)', AXIS_ACCENTS['sample']),
-    (ax_pressure_xgs600, 'Chamber pressure', 'Pressure (mbar)', AXIS_ACCENTS['pressure']),
-    (ax_temperature_oven, 'Oven PID temperature', 'Temperature (ºC)', TEMPERATURE_VIEW_STYLES['oven']['accent']),
-    (ax_current_keysight, 'Evaporator current', 'Current (A)', AXIS_ACCENTS['current']),
-    (ax_voltage_keysight, 'Evaporator voltage', 'Voltage (V)', AXIS_ACCENTS['voltage']),
-    (ax_temperature_ck1, 'CK-1 crucible temperature', 'Temperature (ºC)', AXIS_ACCENTS['ck1_temperature']),
-]
+    plot_axes_config = [
+        (ax_thickness_ck1, 'CK-1 QMB thickness', 'Thickness (Å)', AXIS_ACCENTS['ck1']),
+        (ax_rate_ck1, 'CK-1 QMB rate', 'Rate (Å/s)', AXIS_ACCENTS['ck1']),
+        (ax_thickness_sample, 'Sample QMB thickness', 'Thickness (Å)', AXIS_ACCENTS['sample']),
+        (ax_rate_sample, 'Sample QMB rate', 'Rate (Å/s)', AXIS_ACCENTS['sample']),
+        (ax_pressure_xgs600, 'Chamber pressure', 'Pressure (mbar)', AXIS_ACCENTS['pressure']),
+        (ax_temperature_oven, 'Oven PID temperature', 'Temperature (ºC)', TEMPERATURE_VIEW_STYLES['oven']['accent']),
+        (ax_current_keysight, 'Evaporator current', 'Current (A)', AXIS_ACCENTS['current']),
+        (ax_voltage_keysight, 'Evaporator voltage', 'Voltage (V)', AXIS_ACCENTS['voltage']),
+        (ax_temperature_ck1, 'CK-1 crucible temperature', 'Temperature (ºC)', AXIS_ACCENTS['ck1_temperature']),
+    ]
 
-for ax, title, ylabel, accent in plot_axes_config:
-    style_measurement_axis(ax, title, ylabel, accent)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    for ax, title, ylabel, accent in plot_axes_config:
+        style_measurement_axis(ax, title, ylabel, accent)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
 
-for ax in [
-    ax_thickness_ck1,
-    ax_rate_ck1,
-    ax_pressure_xgs600,
-    ax_thickness_sample,
-    ax_rate_sample,
-    ax_temperature_oven,
-]:
-    ax.set_xlabel('')
+    for ax in [
+        ax_thickness_ck1,
+        ax_rate_ck1,
+        ax_pressure_xgs600,
+        ax_thickness_sample,
+        ax_rate_sample,
+        ax_temperature_oven,
+    ]:
+        ax.set_xlabel('')
 
-phase_title_text = create_phase_badge(fig, 'STARTING')
+    phase_title_text = create_phase_badge(fig, 'STARTING')
 
-axis_info_texts = {
-    'ck1_thickness': ax_thickness_ck1.text(0.02, 0.98, '', transform=ax_thickness_ck1.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
-    'ck1_rate': ax_rate_ck1.text(0.02, 0.98, '', transform=ax_rate_ck1.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
-    'sample_thickness': ax_thickness_sample.text(0.02, 0.98, '', transform=ax_thickness_sample.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
-    'sample_rate': ax_rate_sample.text(0.02, 0.98, '', transform=ax_rate_sample.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
-    'pressure': ax_pressure_xgs600.text(0.02, 0.98, '', transform=ax_pressure_xgs600.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
-    'oven_temp': ax_temperature_oven.text(0.02, 0.98, '', transform=ax_temperature_oven.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
-    'current': ax_current_keysight.text(0.02, 0.98, '', transform=ax_current_keysight.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
-    'voltage': ax_voltage_keysight.text(0.02, 0.98, '', transform=ax_voltage_keysight.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
-    'ck1_temp': ax_temperature_ck1.text(0.02, 0.98, '', transform=ax_temperature_ck1.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
-}
+    axis_info_texts = {
+        'ck1_thickness': ax_thickness_ck1.text(0.02, 0.98, '', transform=ax_thickness_ck1.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
+        'ck1_rate': ax_rate_ck1.text(0.02, 0.98, '', transform=ax_rate_ck1.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
+        'sample_thickness': ax_thickness_sample.text(0.02, 0.98, '', transform=ax_thickness_sample.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
+        'sample_rate': ax_rate_sample.text(0.02, 0.98, '', transform=ax_rate_sample.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
+        'pressure': ax_pressure_xgs600.text(0.02, 0.98, '', transform=ax_pressure_xgs600.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
+        'oven_temp': ax_temperature_oven.text(0.02, 0.98, '', transform=ax_temperature_oven.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
+        'current': ax_current_keysight.text(0.02, 0.98, '', transform=ax_current_keysight.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
+        'voltage': ax_voltage_keysight.text(0.02, 0.98, '', transform=ax_voltage_keysight.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
+        'ck1_temp': ax_temperature_ck1.text(0.02, 0.98, '', transform=ax_temperature_ck1.transAxes, va='top', ha='left', fontsize=8.5, bbox=AXIS_INFO_STYLE),
+    }
 
 # _____________________HELPERS__________________________________________________
 LIVE_PLOT_ENABLED = True
@@ -630,10 +806,16 @@ pyrometer_state = {
 temperature_view_state = {'mode': PYROMETER_PROFILE.default_view}
 temperature_view_buttons = {}
 
-live_target_temp_line = ax_temperature_ck1.axhline(HEATING_TRIGGER_TEMP_C, linestyle='--', linewidth=1.1, color='black', alpha=0.8)
-live_target_rate_line = ax_rate_ck1.axhline(CK1_RATE_TARGET_A_PER_S, linestyle='--', linewidth=1.1, color='black', alpha=0.8)
-live_target_rate_low_line = ax_rate_ck1.axhline(CK1_RATE_LOW_A_PER_S, linestyle=':', linewidth=1.0, color='gray', alpha=0.85)
-live_target_rate_high_line = ax_rate_ck1.axhline(CK1_RATE_HIGH_A_PER_S, linestyle=':', linewidth=1.0, color='gray', alpha=0.85)
+if USE_QT_PHASE13_DASHBOARD:
+    live_target_temp_line = None
+    live_target_rate_line = None
+    live_target_rate_low_line = None
+    live_target_rate_high_line = None
+else:
+    live_target_temp_line = ax_temperature_ck1.axhline(HEATING_TRIGGER_TEMP_C, linestyle='--', linewidth=1.1, color='black', alpha=0.8)
+    live_target_rate_line = ax_rate_ck1.axhline(CK1_RATE_TARGET_A_PER_S, linestyle='--', linewidth=1.1, color='black', alpha=0.8)
+    live_target_rate_low_line = ax_rate_ck1.axhline(CK1_RATE_LOW_A_PER_S, linestyle=':', linewidth=1.0, color='gray', alpha=0.85)
+    live_target_rate_high_line = ax_rate_ck1.axhline(CK1_RATE_HIGH_A_PER_S, linestyle=':', linewidth=1.0, color='gray', alpha=0.85)
 
 control_panel_ax = None
 live_target_textboxes = {}
@@ -644,6 +826,23 @@ live_manual_textboxes = {}
 live_manual_buttons = {}
 live_target_status_text = None
 live_dashboard_text = None
+
+# Shared text state used by both the Matplotlib fallback and the Qt dashboard.
+# This must exist before telemetry/status callbacks or Abort / safe stop can run.
+live_action_status_lock = threading.Lock()
+live_action_status_text = ''
+
+# Live PID/rate/compound selection is independent from editable target values.
+# One action lock serializes controller decisions against GUI mode handovers.
+feedback_mode_lock = threading.Lock()
+feedback_mode_action_lock = threading.Lock()
+feedback_mode_state = {
+    'mode': str(EVAPORATION_CONTROL_MODE).strip().lower(),
+    'generation': 0,
+    'previous_mode': None,
+    'changed_at': time.time(),
+    'reason': 'startup configuration',
+}
 
 manual_current_lock = threading.Lock()
 manual_current_state = {
@@ -686,10 +885,126 @@ def get_pid_temp_band_c():
 
 
 def get_evaporation_control_mode():
-    mode = str(EVAPORATION_CONTROL_MODE).strip().lower()
+    with feedback_mode_lock:
+        mode = str(feedback_mode_state.get('mode', EVAPORATION_CONTROL_MODE)).strip().lower()
     if mode not in {CONTROL_MODE_TEMPERATURE, CONTROL_MODE_RATE, CONTROL_MODE_COMPOUND}:
         return CONTROL_MODE_TEMPERATURE
     return mode
+
+
+def get_evaporation_control_mode_snapshot():
+    """Return one atomic mode/generation pair for a controller iteration."""
+    with feedback_mode_lock:
+        mode = str(feedback_mode_state.get('mode', EVAPORATION_CONTROL_MODE)).strip().lower()
+        generation = int(feedback_mode_state.get('generation', 0))
+    if mode not in {CONTROL_MODE_TEMPERATURE, CONTROL_MODE_RATE, CONTROL_MODE_COMPOUND}:
+        mode = CONTROL_MODE_TEMPERATURE
+    return mode, generation
+
+
+def feedback_mode_is_current(expected_mode, expected_generation):
+    with feedback_mode_lock:
+        return (
+            str(feedback_mode_state.get('mode')).strip().lower() == str(expected_mode).strip().lower()
+            and int(feedback_mode_state.get('generation', 0)) == int(expected_generation)
+        )
+
+
+def run_feedback_mode_action(expected_mode, expected_generation, callback, *args, **kwargs):
+    """Serialize a controller action against live GUI mode changes.
+
+    A mode switch and one PID/rate action can never mutate controller state or
+    command the Keysight at the same time.  If the GUI changed mode after the
+    automation thread captured its snapshot, the stale action is discarded.
+    """
+    with feedback_mode_action_lock:
+        if not feedback_mode_is_current(expected_mode, expected_generation):
+            return None
+        return callback(*args, **kwargs)
+
+
+def set_evaporation_control_mode(mode, reason='operator request'):
+    """Switch the live feedback controller without stepping Keysight current.
+
+    The present current is preserved.  Controller memories and cascade state
+    trackers are reinitialized for a bumpless handover, and the normal control
+    period must elapse before the selected loop may apply its first correction.
+    """
+    global EVAPORATION_CONTROL_MODE
+
+    normalized = str(mode).strip().lower()
+    valid_modes = {CONTROL_MODE_TEMPERATURE, CONTROL_MODE_RATE, CONTROL_MODE_COMPOUND}
+    if normalized not in valid_modes:
+        raise ValueError(
+            f'Unsupported feedback mode {mode!r}; expected temperature, rate or compound.'
+        )
+    if stop_event.is_set():
+        raise RuntimeError('The phase is stopping; feedback mode can no longer be changed.')
+
+    with feedback_mode_action_lock:
+        with feedback_mode_lock:
+            previous = str(feedback_mode_state.get('mode', EVAPORATION_CONTROL_MODE)).strip().lower()
+            if previous == normalized:
+                _set_live_action_status(
+                    f'Feedback controller already set to {evaporation_control_mode_label(normalized)}.'
+                )
+                return False
+            EVAPORATION_CONTROL_MODE = normalized
+            feedback_mode_state['mode'] = normalized
+            feedback_mode_state['generation'] = int(feedback_mode_state.get('generation', 0)) + 1
+            feedback_mode_state['previous_mode'] = previous
+            feedback_mode_state['changed_at'] = time.time()
+            feedback_mode_state['reason'] = str(reason)
+
+        current_setpoint = keysight_state.get('set_current_a')
+        if current_setpoint is None:
+            current_setpoint = latest_value('Keysight power supply', 'current_data')
+        current_temp = latest_control_ck1_temperature()
+
+        # Clear incompatible controller state while preserving hardware output.
+        reset_rate_pid(f'live mode switch {previous} -> {normalized}')
+        if normalized == CONTROL_MODE_COMPOUND:
+            handover_target = initial_cascade_target_c(current_temp)
+            cascade_rate_controller.reset(
+                base_target_c=get_heating_trigger_temp_c(),
+                current_target_c=handover_target,
+                now_s=time.monotonic(),
+            )
+            feedback_control_state['active_temperature_target_c'] = handover_target
+            rate_pid_state['last_outer_target_c'] = handover_target
+            reset_temperature_pid('live compound handover', handover_target)
+        else:
+            handover_target = get_heating_trigger_temp_c()
+            feedback_control_state['active_temperature_target_c'] = handover_target
+            reset_temperature_pid('live feedback-mode handover', handover_target)
+
+        keysight_state['last_step_at'] = time.time()
+        controller_label = evaporation_control_mode_label(normalized)
+        set_active_feedback_controller(f'Mode-switch settling hold -> {controller_label}')
+        current_text = '--' if current_setpoint is None else f'{float(current_setpoint):.3f} A'
+        message = (
+            f'Feedback controller changed from {evaporation_control_mode_label(previous)} '
+            f'to {controller_label}. Keysight current held at {current_text}; '
+            'controller state reset bumplessly and settling restarted.'
+        )
+        _set_live_action_status(message)
+        log_control_decision(
+            mode='feedback_mode_switch',
+            active_controller=f'Mode-switch settling hold -> {controller_label}',
+            current_before_a=current_setpoint,
+            current_after_a=current_setpoint,
+            applied_delta=0.0,
+            integral_frozen=True,
+            settling=True,
+            signal_valid=True,
+            reason=f'{reason}: {previous} -> {normalized}; current preserved.',
+        )
+        ts, formatted, dec = log_timestamp()
+        print(
+            f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - "
+            f"{Fore.CYAN}{message}{Style.RESET_ALL}"
+        )
+    return True
 
 
 def evaporation_control_mode_label(mode=None):
@@ -697,7 +1012,7 @@ def evaporation_control_mode_label(mode=None):
     return {
         CONTROL_MODE_TEMPERATURE: 'Temperature PID',
         CONTROL_MODE_RATE: 'Rate PID',
-        CONTROL_MODE_COMPOUND: 'Compound rate + temperature guard',
+        CONTROL_MODE_COMPOUND: 'Cascade rate → temperature PID',
     }.get(mode, str(mode))
 
 
@@ -721,6 +1036,52 @@ def set_active_feedback_controller(label):
 def get_active_feedback_controller():
     return feedback_control_state.get('active_controller', '--')
 
+
+def active_temperature_target_c():
+    return float(feedback_control_state.get('active_temperature_target_c', get_heating_trigger_temp_c()))
+
+
+def log_control_decision(**values):
+    """Append one traceable control decision without ever disrupting the run."""
+    try:
+        estimate = rate_pid_state.get('last_rate_estimate')
+        defaults = {
+            'timestamp': datetime.now().isoformat(timespec='milliseconds'),
+            'monotonic_s': f"{time.monotonic():.6f}",
+            'phase': current_phase() if 'process_state' in globals() else 'INIT',
+            'mode': get_evaporation_control_mode(),
+            'active_controller': get_active_feedback_controller(),
+            'molecule_profile': MOLECULE_CONDITION_PROFILE,
+            'raw_temperature_c': latest_ck1_temperature() if 'data' in globals() else None,
+            'control_temperature_c': latest_control_ck1_temperature() if 'data' in globals() else None,
+            'base_temperature_target_c': get_heating_trigger_temp_c(),
+            'active_temperature_target_c': active_temperature_target_c(),
+            'raw_qmb_rate_a_per_s': fast_filtered_ck1_rate() if 'control_signal_history' in globals() else None,
+            'estimated_rate_a_per_s': rate_pid_state.get('last_filtered_rate_a_per_s'),
+            'rate_fit_r_squared': getattr(estimate, 'r_squared', None),
+            'rate_fit_span_s': getattr(estimate, 'span_s', None),
+            'rate_fit_points': getattr(estimate, 'sample_count', None),
+            'rate_target_a_per_s': get_ck1_rate_target_a_per_s(),
+            'temperature_slope_c_per_min': rate_pid_state.get('cascade_temp_slope_c_per_min'),
+            'rate_trend_a_per_s2': rate_pid_state.get('cascade_rate_trend_a_per_s2'),
+            'inner_loop_ready': rate_pid_state.get('cascade_inner_ready'),
+            'inner_ready_elapsed_s': rate_pid_state.get('cascade_inner_ready_elapsed_s'),
+            'thermal_response_pending': rate_pid_state.get('cascade_thermal_response_pending'),
+            'last_outer_action_age_s': (
+                None
+                if not rate_pid_state.get('last_outer_action_at')
+                else max(0.0, time.monotonic() - float(rate_pid_state.get('last_outer_action_at')))
+            ),
+            'outer_freeze_reason': rate_pid_state.get('cascade_outer_freeze_reason'),
+        }
+        defaults.update(values)
+        control_decision_logger.log(**defaults)
+    except Exception as exc:
+        now = time.time()
+        if now - rate_pid_state.get('last_log_error_at', 0.0) > 60.0:
+            print(f"Control-decision logging warning: {exc}")
+            rate_pid_state['last_log_error_at'] = now
+
 def ck1_rate_band_from_target(rate_target_a_per_s):
     """Return the CK-1 rate acceptance band derived from the target rate.
 
@@ -738,6 +1099,8 @@ def ck1_rate_band_from_target(rate_target_a_per_s):
 
 
 def refresh_live_target_lines():
+    if USE_QT_PHASE13_DASHBOARD:
+        return
     targets = get_live_heating_targets()
     live_target_temp_line.set_ydata([targets['trigger_temp_c'], targets['trigger_temp_c']])
     live_target_rate_line.set_ydata([targets['rate_target_a_per_s'], targets['rate_target_a_per_s']])
@@ -1019,10 +1382,15 @@ def _wrap_gui_column_text(text: str, max_chars: int = 20) -> str:
 
 
 def _set_live_action_status(message: str):
+    global live_action_status_text
+    formatted = str(message).replace(' | ', '\n')
+    with live_action_status_lock:
+        live_action_status_text = formatted
+
+    if USE_QT_PHASE13_DASHBOARD:
+        return
     if live_target_status_text is not None:
-        live_target_status_text.set_text(
-            _wrap_gui_column_text(str(message).replace(' | ', '\n'))
-        )
+        live_target_status_text.set_text(_wrap_gui_column_text(formatted))
     try:
         fig.canvas.draw_idle()
     except Exception:
@@ -1100,9 +1468,9 @@ def set_manual_current_enabled(enabled: bool, source: str = 'GUI', emit_message:
         _set_live_action_status(message)
 
 
-def _apply_manual_current_from_widgets(event=None):
+def apply_manual_current_value(requested_current_a: float, source: str = 'GUI manual current control'):
     try:
-        requested_current_a = float(live_manual_textboxes['manual_current_a'].text.strip().replace(',', '.'))
+        requested_current_a = float(requested_current_a)
     except Exception as e:
         message = f'Could not parse manual Keysight current input: {e}'
         print(message)
@@ -1118,7 +1486,7 @@ def _apply_manual_current_from_widgets(event=None):
     with manual_current_lock:
         manual_current_state['requested_current_a'] = requested_current_a
 
-    set_manual_current_enabled(True, 'GUI manual current control', emit_message=False)
+    set_manual_current_enabled(True, source, emit_message=False)
 
     try:
         keysight_set_current(requested_current_a)
@@ -1154,6 +1522,16 @@ def _apply_manual_current_from_widgets(event=None):
     refresh_manual_current_button_styles()
 
 
+def _apply_manual_current_from_widgets(event=None):
+    try:
+        requested_current_a = float(live_manual_textboxes['manual_current_a'].text.strip().replace(',', '.'))
+    except Exception as e:
+        message = f'Could not parse manual Keysight current input: {e}'
+        print(message)
+        _set_live_action_status(message)
+        return
+    apply_manual_current_value(requested_current_a, 'GUI manual current control')
+
 def _resume_automatic_current_control(event=None):
     set_manual_current_enabled(False, 'GUI Auto current button')
 
@@ -1161,9 +1539,18 @@ def _resume_automatic_current_control(event=None):
 def confirm_shutter_open(source: str = 'GUI button'):
     ck1_baseline = latest_ck1_thickness()
     sample_baseline = latest_sample_thickness()
+    ck1_times = data['CK-1 evaporator QMB']['thickness_times']
+    sample_times = data['Sample QMB']['thickness_times']
+    ck1_baseline_time = ck1_times[-1] if ck1_times else None
+    sample_baseline_time = sample_times[-1] if sample_times else None
     with state_lock:
         process_state['baseline_ck1_thickness'] = ck1_baseline
         process_state['baseline_sample_thickness'] = sample_baseline
+        process_state['baseline_ck1_time'] = ck1_baseline_time
+        process_state['baseline_sample_time'] = sample_baseline_time
+        process_state['calibration_result'] = None
+        process_state['calibration_quality_status'] = 'not evaluated'
+        process_state['final_thickness_ratio'] = None
         process_state['shutter_open_confirmed'] = True
         process_state['shutter_close_confirmed'] = False
 
@@ -1188,7 +1575,17 @@ def confirm_shutter_closed(source: str = 'GUI button'):
 
 
 def request_gui_abort(event=None):
-    message = 'Abort requested from GUI. Stopping automation and switching Keysight output off safely.'
+    """Abort Phase 01 immediately and close only this phase process.
+
+    Abort is deliberately different from Finish Phase: it does not run the
+    normal controlled ramp-down.  The hardware-safe priority is to command the
+    Keysight to 0 A / OUTPUT OFF first, then let the phase process save what it
+    can and exit.  The unified launcher remains open.
+    """
+    message = (
+        'Abort requested from GUI. Keysight is being commanded immediately to '
+        '0 A / OUTPUT OFF; Phase 01 will then close.'
+    )
     print_banner(message)
     _set_live_action_status(message)
 
@@ -1197,13 +1594,14 @@ def request_gui_abort(event=None):
         process_state['transition_reason'] = message
         process_state['gui_auto_close'] = True
 
+    # Safety action first. Do not delay OUTPUT OFF behind snapshots or file I/O.
+    emergency_keysight_shutdown('GUI Abort button - immediate phase stop')
+
     try:
         request_snapshot('gui_abort')
         save_phase_summary('gui_abort')
     except Exception as e:
-        print(f"Could not save GUI abort summary before stopping: {e}")
-
-    emergency_keysight_shutdown('GUI Abort button')
+        print(f"Could not save GUI abort summary during shutdown: {e}")
 
 
 def request_gui_finish(event=None):
@@ -1263,6 +1661,9 @@ def set_temperature_view(mode):
     if mode not in {'oven', 'pyrometer', 'sample'}:
         return
     temperature_view_state['mode'] = mode
+    if USE_QT_PHASE13_DASHBOARD:
+        print(f"Temperature graph view changed to: {_temperature_view_label(mode)}")
+        return
     accent = TEMPERATURE_VIEW_STYLES[mode]['accent']
     line_temperature_oven.set_color(accent)
     ax_temperature_oven.set_title(
@@ -1672,7 +2073,9 @@ def update_live_dashboard_text(snapshot=None):
     lines = [
         f'Phase: {phase}',
         f'Feedback mode: {evaporation_control_mode_label()}',
+        f'Molecule profile: {MOLECULE_CONDITION_PROFILE}',
         f'Active control: {get_active_feedback_controller()}',
+        f'Active T target: {active_temperature_target_c():.2f} ºC',
         f'Shutter: {shutter_status}',
         f'Current mode: Manual {manual_mode}',
         f'Manual I: {float(manual_applied):.3f} A' if manual_applied is not None else 'Manual I: --',
@@ -1687,7 +2090,8 @@ def update_live_dashboard_text(snapshot=None):
         f'Target rate: {targets["rate_target_a_per_s"]:.3f} Å/s',
         f'Band: {targets["rate_low_a_per_s"]:.3f}-{targets["rate_high_a_per_s"]:.3f}',
         f'CK-1 T: {current_temp:.1f} ºC' if current_temp is not None else 'CK-1 T: --',
-        f'CK-1 rate: {current_rate:.3f} Å/s' if current_rate is not None else 'CK-1 rate: --',
+        f'CK-1 rate raw: {current_rate:.3f} Å/s' if current_rate is not None else 'CK-1 rate raw: --',
+        f'Rate estimate: {filtered_ck1_rate():.3f} Å/s' if filtered_ck1_rate() is not None else 'Rate estimate: --',
         f'I: {current_current:.3f} A' if current_current is not None else 'I: --',
         f'V: {current_voltage:.3f} V' if current_voltage is not None else 'V: --',
     ]
@@ -1745,16 +2149,67 @@ def average_ck1_rate(num_points=CK1_RATE_AVG_WINDOW_POINTS):
     return sum(window) / len(window)
 
 
-def filtered_ck1_rate(num_points=RATE_PID_FILTER_POINTS):
+def latest_control_ck1_temperature():
+    """Median-filtered temperature for control only; watchdog stays raw."""
     with data_lock:
-        rates = list(data['CK-1 evaporator QMB']['rate_data'])
-    return robust_rate_average(rates, num_points)
+        values = list(data['Arduino CK-1 crucible temperature']['temperature_data'])
+    filtered = robust_median(values, CONTROL_TEMPERATURE_FILTER_POINTS)
+    return latest_ck1_temperature() if filtered is None else filtered
+
+
+def estimate_ck1_rate_from_thickness():
+    """Return one cached robust estimate per new CK-1 thickness sample."""
+    with control_history_lock:
+        times = list(control_signal_history['thickness_times'])
+        thickness = list(control_signal_history['thickness_data'])
+    sample_timestamp = times[-1] if times else None
+    if sample_timestamp == rate_pid_state.get('last_rate_estimate_sample_timestamp'):
+        return rate_pid_state.get('last_rate_estimate_value'), rate_pid_state.get('last_rate_estimate')
+
+    estimate = robust_rate_from_thickness(
+        times, thickness,
+        window_s=RATE_ESTIMATOR_WINDOW_S,
+        min_points=RATE_ESTIMATOR_MIN_POINTS,
+        min_span_s=RATE_ESTIMATOR_MIN_SPAN_S,
+    )
+    rate_pid_state['last_rate_estimate_sample_timestamp'] = sample_timestamp
+    rate_pid_state['last_rate_estimate'] = estimate
+    value = None
+    if estimate.valid and estimate.value_per_s is not None:
+        if estimate.r_squared is not None and estimate.r_squared >= RATE_ESTIMATOR_MIN_R2:
+            value = max(0.0, float(estimate.value_per_s))
+            rate_pid_state['last_valid_estimate_at'] = time.monotonic()
+            with control_history_lock:
+                control_signal_history['estimated_rate_times'].append(sample_timestamp)
+                control_signal_history['estimated_rate_data'].append(value)
+                # Keep a bounded history while retaining several trend windows.
+                keep_after = sample_timestamp.timestamp() - max(900.0, 4.0 * float(RATE_ESTIMATE_TREND_WINDOW_S))
+                while (
+                    len(control_signal_history['estimated_rate_times']) > 2
+                    and control_signal_history['estimated_rate_times'][0].timestamp() < keep_after
+                ):
+                    control_signal_history['estimated_rate_times'].pop(0)
+                    control_signal_history['estimated_rate_data'].pop(0)
+    rate_pid_state['last_rate_estimate_value'] = value
+    return value, estimate
+
+
+def filtered_ck1_rate(num_points=RATE_PID_FILTER_POINTS):
+    value, _estimate = estimate_ck1_rate_from_thickness()
+    return value
+
+
+def fast_filtered_ck1_rate(num_points=RATE_PID_FILTER_POINTS):
+    with control_history_lock:
+        values = list(control_signal_history['rate_data'])
+    value = robust_rate_average(values, num_points)
+    return None if value is None else max(0.0, float(value))
 
 
 def latest_ck1_rate_timestamp():
-    with data_lock:
-        times = data['CK-1 evaporator QMB']['rate_times']
-        return times[-1] if times else None
+    with control_history_lock:
+        values = control_signal_history['thickness_times']
+        return values[-1] if values else None
 
 
 def latest_ck1_rate_age_s():
@@ -1767,32 +2222,38 @@ def latest_ck1_rate_age_s():
         return None
 
 
+def estimate_ck1_rate_trend_per_s():
+    # Trend decisions use the same robust thickness-derived rate as the outer
+    # loop, never the noisy instantaneous QMB rate.  The window is comparable
+    # to the measured current-to-rate delay, so the controller can recognize
+    # a response already moving in the correct direction.
+    with control_history_lock:
+        times = list(control_signal_history['estimated_rate_times'])
+        values = list(control_signal_history['estimated_rate_data'])
+    estimate = robust_linear_slope(
+        times, values,
+        window_s=RATE_ESTIMATE_TREND_WINDOW_S,
+        min_points=max(3, int(RATE_ESTIMATE_TREND_MIN_POINTS)),
+        min_span_s=min(120.0, max(60.0, float(RATE_ESTIMATE_TREND_WINDOW_S) * 0.5)),
+    )
+    if not estimate.valid or estimate.value_per_s is None:
+        return None
+    return float(estimate.value_per_s)
+
+
 def estimate_ck1_temp_slope_c_per_min(num_points=TEMP_SLOPE_WINDOW_POINTS):
-    times = data['Arduino CK-1 crucible temperature']['temperature_times']
-    temps = data['Arduino CK-1 crucible temperature']['temperature_data']
-
-    if len(times) < num_points or len(temps) < num_points:
+    with data_lock:
+        times = list(data['Arduino CK-1 crucible temperature']['temperature_times'])
+        values = list(data['Arduino CK-1 crucible temperature']['temperature_data'])
+    estimate = robust_linear_slope(
+        times, values,
+        window_s=TEMP_SLOPE_WINDOW_S,
+        min_points=max(2, int(num_points)),
+        min_span_s=TEMP_SLOPE_MIN_SPAN_S,
+    )
+    if not estimate.valid or estimate.value_per_s is None:
         return None
-
-    recent_times = times[-num_points:]
-    recent_temps = temps[-num_points:]
-
-    t0 = recent_times[0]
-    x = [(ts - t0).total_seconds() for ts in recent_times]
-    y = recent_temps
-
-    n = len(x)
-    if n < 2:
-        return None
-
-    x_mean = sum(x) / n
-    y_mean = sum(y) / n
-    denom = sum((xi - x_mean) ** 2 for xi in x)
-    if denom <= 0:
-        return None
-
-    slope_c_per_s = sum((xi - x_mean) * (yi - y_mean) for xi, yi in zip(x, y)) / denom
-    return slope_c_per_s * 60.0
+    return float(estimate.value_per_s) * 60.0
 
 
 def target_ck1_temp_slope_c_per_min(current_a):
@@ -1815,16 +2276,17 @@ def max_temp_control_step_a(current_a):
 def apply_temperature_slope_control(current_setpoint):
     temp_slope = estimate_ck1_temp_slope_c_per_min()
     if temp_slope is None:
-        changed = nudge_keysight_current(
-            +KEYSIGHT_STEP_A,
-            'Temperature-slope control waiting for enough temperature points; using fallback ramp step',
-            max_current=KEYSIGHT_SOFT_WARNING_A
+        set_active_feedback_controller('Slope ramp waiting for valid temperature trend')
+        log_control_decision(
+            mode='slope_ramp', active_controller='Slope ramp hold',
+            current_before_a=current_setpoint, current_after_a=current_setpoint,
+            signal_valid=False, integral_frozen=True,
+            reason='Insufficient robust temperature-slope history; current held.',
         )
-        return changed, None, None, None
+        return False, None, None, 0.0
 
     target_slope = target_ck1_temp_slope_c_per_min(current_setpoint)
     slope_error = target_slope - temp_slope
-
     if abs(slope_error) <= TEMP_SLOPE_DEADBAND_C_PER_MIN:
         ts, formatted, dec = log_timestamp()
         print(
@@ -1833,19 +2295,32 @@ def apply_temperature_slope_control(current_setpoint):
             f"target={target_slope:.3f} ºC/min; inside deadband, holding current at "
             f"{current_setpoint:.3f} A{Style.RESET_ALL}"
         )
+        log_control_decision(
+            mode='slope_ramp', active_controller='Slope ramp hold', error=slope_error,
+            current_before_a=current_setpoint, current_after_a=current_setpoint,
+            inside_deadband=True, signal_valid=True,
+            reason=f'Robust temperature slope {temp_slope:.4f} ºC/min in deadband.',
+        )
         return False, temp_slope, target_slope, 0.0
 
-    delta_a = TEMP_SLOPE_KP_A_PER_C_PER_MIN * slope_error
+    raw_delta = TEMP_SLOPE_KP_A_PER_C_PER_MIN * slope_error
     max_step = max_temp_control_step_a(current_setpoint)
-    delta_a = clamp(delta_a, -max_step, +max_step)
-
+    delta_a = clamp(raw_delta, -max_step, +max_step)
+    before = float(current_setpoint)
     changed = nudge_keysight_current(
         delta_a,
-        (
-            f'Temp-slope control: measured={temp_slope:.3f} ºC/min, '
-            f'target={target_slope:.3f} ºC/min, error={slope_error:.3f} ºC/min'
-        ),
-        max_current=KEYSIGHT_SOFT_WARNING_A
+        f'Temp-slope control: measured={temp_slope:.3f} ºC/min, target={target_slope:.3f} ºC/min, error={slope_error:.3f} ºC/min',
+        max_current=KEYSIGHT_SOFT_WARNING_A,
+    )
+    after = keysight_state.get('set_current_a')
+    log_control_decision(
+        mode='slope_ramp', active_controller='Slope ramp', error=slope_error,
+        p_term=raw_delta, requested_delta=delta_a,
+        applied_delta=(float(after) - before if after is not None else 0.0),
+        current_before_a=before, current_after_a=after,
+        slew_or_step_limited=abs(raw_delta - delta_a) > 1e-12,
+        signal_valid=True,
+        reason=f'Robust temperature slope {temp_slope:.4f} ºC/min; target {target_slope:.4f}.',
     )
     return changed, temp_slope, target_slope, delta_a
 
@@ -1855,32 +2330,21 @@ def clamp(value, low, high):
 
 
 def heating_ready_for_shutter(ck1_temp, ck1_rate_avg):
-    """Return True when the selected feedback mode is stable enough for shutter opening."""
-    if get_evaporation_control_mode() == CONTROL_MODE_TEMPERATURE:
-        return (
-            ck1_temp is not None and ck1_temp >= get_heating_trigger_temp_c()
-            and ck1_rate_avg is not None
-            and ck1_rate_avg >= get_ck1_rate_target_a_per_s()
-        )
+    """Return True when the operator-facing Phase 01 process targets are met.
 
-    filtered_rate = filtered_ck1_rate()
-    sample_timestamp = latest_ck1_rate_timestamp()
-    if sample_timestamp != rate_pid_state.get('last_ready_sample_timestamp'):
-        rate_pid_state['last_ready_sample_timestamp'] = sample_timestamp
-        inside_band = (
-            rate_pid_state.get('activated', False)
-            and ck1_temp is not None
-            and float(ck1_temp) >= RATE_PID_MIN_CONTROL_TEMP_C
-            and filtered_rate is not None
-            and get_ck1_rate_low_a_per_s() <= filtered_rate <= get_ck1_rate_high_a_per_s()
-        )
-        if inside_band:
-            rate_pid_state['ready_stable_reads'] += 1
-        else:
-            rate_pid_state['ready_stable_reads'] = 0
-
-    return rate_pid_state.get('ready_stable_reads', 0) >= RATE_PID_READY_STABLE_READS
-
+    Shutter progression is intentionally simple and auditable: CK-1 temperature
+    must be at or above its target/guide and the averaged CK-1 QMB rate must be
+    at or above its target.  Controller bands, rate trends, temperature slopes,
+    settling timers and current headroom do not gate this state transition.
+    """
+    target_temp = get_heating_trigger_temp_c()
+    target_rate = get_ck1_rate_target_a_per_s()
+    return (
+        ck1_temp is not None
+        and ck1_rate_avg is not None
+        and float(ck1_temp) >= float(target_temp)
+        and float(ck1_rate_avg) >= float(target_rate)
+    )
 
 def current_phase():
     with state_lock:
@@ -1970,6 +2434,8 @@ def force_keysight_zero_output(reason: str = 'Force Keysight zero output'):
         keysight_state['set_current_a'] = 0.0
         keysight_state['hold_current_a'] = 0.0
         keysight_state['automation_active'] = False
+        keysight_state['startup_in_progress'] = False
+        keysight_state['startup_verified'] = False
         keysight_state['reason_stopped'] = reason
     except Exception:
         pass
@@ -2147,11 +2613,31 @@ def save_snapshot(tag: str):
         return None
 
 
+def calculate_calibration_result():
+    """Return the shared exact-crossing calibration result as a summary dict."""
+    result = exact_calibration_ratio(
+        sample_times=data['Sample QMB']['thickness_times'],
+        sample_thickness=data['Sample QMB']['thickness_data'],
+        ck1_times=data['CK-1 evaporator QMB']['thickness_times'],
+        ck1_thickness=data['CK-1 evaporator QMB']['thickness_data'],
+        sample_baseline_a=process_state.get('baseline_sample_thickness'),
+        ck1_baseline_a=process_state.get('baseline_ck1_thickness'),
+        sample_start_time=process_state.get('baseline_sample_time'),
+        ck1_start_time=process_state.get('baseline_ck1_time'),
+        target_sample_a=CALIBRATION_TARGET_SAMPLE_A,
+        minimum_linearity_r2=CALIBRATION_MIN_LINEAR_R2,
+    )
+    return result.as_dict()
+
+
 def calculate_thickness_ratio():
-    """Return CK-1 relative thickness divided by Sample relative thickness."""
+    """Return the frozen exact-crossing ratio, or a live ratio before completion."""
+    result = process_state.get('calibration_result') or {}
+    frozen = result.get('ratio')
+    if frozen is not None:
+        return frozen
     ck1_rel = relative_ck1_thickness()
     sample_rel = relative_sample_thickness()
-
     if ck1_rel is None or sample_rel is None or sample_rel == 0:
         return None
     return ck1_rel / sample_rel
@@ -2167,9 +2653,27 @@ def save_phase_summary(tag: str):
             f.write(f"phase: {current_phase()}\n")
             f.write(f"transition_reason: {process_state['transition_reason']}\n")
             f.write(f"evaporation_feedback_mode: {get_evaporation_control_mode()}\n")
+            f.write(f"molecule_condition_profile: {MOLECULE_CONDITION_PROFILE}\n")
             f.write(f"active_feedback_controller: {get_active_feedback_controller()}\n")
+            f.write(f"active_temperature_target_c: {active_temperature_target_c()}\n")
             f.write(f"filtered_ck1_rate_a_per_s: {filtered_ck1_rate()}\n")
+            estimate = rate_pid_state.get('last_rate_estimate')
+            f.write(f"rate_fit_r_squared: {getattr(estimate, 'r_squared', None)}\n")
+            f.write(f"rate_fit_span_s: {getattr(estimate, 'span_s', None)}\n")
+            f.write(f"control_decision_log: {control_decision_logger.path}\n")
+            f.write(f"data_quality_event_log: {data_quality_event_logger.path}\n")
             f.write(f"rate_control_temperature_ceiling_c: {RATE_CONTROL_MAX_TEMP_C}\n")
+            f.write(f"watchdog_maximum_temperature_c: {TEMP_WATCHDOG_MAX_TEMP_C}\n")
+            f.write(f"maximum_automatic_current_cap_a: {KEYSIGHT_SOFT_WARNING_A}\n")
+            f.write(f"cascade_inner_ready: {rate_pid_state.get('cascade_inner_ready')}\n")
+            f.write(f"cascade_inner_ready_elapsed_s: {rate_pid_state.get('cascade_inner_ready_elapsed_s')}\n")
+            f.write(f"cascade_thermal_response_pending: {rate_pid_state.get('cascade_thermal_response_pending')}\n")
+            f.write(f"cascade_outer_freeze_reason: {rate_pid_state.get('cascade_outer_freeze_reason')}\n")
+            f.write(f"cascade_temperature_slope_c_per_min: {rate_pid_state.get('cascade_temp_slope_c_per_min')}\n")
+            f.write(f"cascade_rate_trend_a_per_s2: {rate_pid_state.get('cascade_rate_trend_a_per_s2')}\n")
+            f.write(f"cascade_inner_ready_temp_band_c: {CASCADE_INNER_READY_TEMP_BAND_C}\n")
+            f.write(f"cascade_inner_ready_stable_duration_s: {effective_cascade_inner_ready_stable_s()}\n")
+            f.write(f"cascade_thermal_response_max_hold_s: {effective_cascade_thermal_hold_max_s()}\n")
             f.write(f"ck1_temp_c: {latest_ck1_temperature()}\n")
             f.write(f"ck1_thickness_a: {latest_ck1_thickness()}\n")
             f.write(f"sample_thickness_a: {latest_sample_thickness()}\n")
@@ -2178,6 +2682,14 @@ def save_phase_summary(tag: str):
             f.write(f"sample_relative_thickness_a: {relative_sample_thickness()}\n")
             f.write(f"ck1_relative_thickness_a: {relative_ck1_thickness()}\n")
             f.write(f"thickness_ratio: {calculate_thickness_ratio()}\n")
+            calibration_result = process_state.get('calibration_result') or {}
+            f.write(f"calibration_quality_status: {process_state.get('calibration_quality_status')}\n")
+            for field in (
+                'crossing_timestamp', 'sample_target_a', 'ck1_relative_at_crossing_a',
+                'fit_slope_ratio', 'linearity_r2', 'quality_pass', 'quality_message',
+                'synchronized_fit_points',
+            ):
+                f.write(f"calibration_{field}: {calibration_result.get(field)}\n")
         print(f"Saved phase summary: {path}")
     except Exception as e:
         print(f"Could not save phase summary '{tag}': {e}")
@@ -2266,31 +2778,92 @@ def keysight_set_voltage_limit(voltage_v: float):
 
 
 def configure_keysight_for_automation():
-    keysight_write('SYST:REM')
-    keysight_write(f'VOLT:RANG {KEYSIGHT_RANGE}')
-    keysight_write('*CLS')
+    """Enable the Keysight safely at 0 A, then apply the first ramp current.
 
-    # The Keysight protection thresholds are hardware latches. They are kept
-    # above the software hard stops to avoid nuisance trips from short transients.
-    keysight_write(f'VOLT:PROT {KEYSIGHT_INSTRUMENT_OVP_V:.3f}')
-    keysight_write('VOLT:PROT:STAT ON')
-    keysight_write(f'CURR:PROT {KEYSIGHT_INSTRUMENT_OCP_A:.3f}')
-    keysight_write('CURR:PROT:STAT ON')
+    The startup is completed synchronously before telemetry/control threads start.
+    The instrument is given one normal enable attempt and one retry, both at 0 A.
+    A failed startup leaves the supply at 0 A with output OFF.
+    """
+    keysight_state['startup_in_progress'] = True
+    keysight_state['startup_verified'] = False
+    keysight_state['startup_attempts'] = 0
+    keysight_state['startup_error'] = None
+    keysight_state['automation_active'] = False
 
-    # Clear any stale protection latch from a previous run before enabling output.
-    keysight_write('VOLT:PROT:CLE')
-    keysight_write('CURR:PROT:CLE')
+    try:
+        keysight_write('SYST:REM')
+        keysight_write(f'VOLT:RANG {KEYSIGHT_RANGE}')
+        keysight_write('*CLS')
 
-    # Normal voltage compliance limit and normal soft-capped current start.
-    keysight_set_voltage_limit(KEYSIGHT_VOLTAGE_LIMIT_V)
-    keysight_set_current(KEYSIGHT_START_CURRENT_A)
+        # Hardware latches remain above the software hard stops so short
+        # readback transients do not create nuisance trips near the normal cap.
+        keysight_write(f'VOLT:PROT {KEYSIGHT_INSTRUMENT_OVP_V:.3f}')
+        keysight_write('VOLT:PROT:STAT ON')
+        keysight_write(f'CURR:PROT {KEYSIGHT_INSTRUMENT_OCP_A:.3f}')
+        keysight_write('CURR:PROT:STAT ON')
+        keysight_set_voltage_limit(KEYSIGHT_VOLTAGE_LIMIT_V)
 
-    keysight_write('OUTP ON')
-    keysight_state['automation_active'] = True
-    keysight_state['last_step_at'] = time.time()
-    keysight_state['automation_started_at'] = time.time()
-    keysight_state['reason_stopped'] = None
+        # Start from one deterministic, electrically benign state. The first
+        # non-zero current is never sent until OUTP ON has been confirmed at 0 A.
+        keysight_set_current(KEYSIGHT_STARTUP_ZERO_CURRENT_A)
+        keysight_write('OUTP OFF')
 
+        verified = False
+        last_status = None
+        for attempt in range(1, KEYSIGHT_STARTUP_ENABLE_ATTEMPTS + 1):
+            keysight_state['startup_attempts'] = attempt
+            keysight_write('VOLT:PROT:CLE')
+            keysight_write('CURR:PROT:CLE')
+            keysight_write('OUTP ON')
+            time.sleep(KEYSIGHT_STARTUP_VERIFY_DELAY_S)
+            last_status = keysight_protection_status()
+            if (
+                last_status.get('output_on') is True
+                and last_status.get('ocp_tripped') is not True
+                and last_status.get('ovp_tripped') is not True
+            ):
+                verified = True
+                break
+
+            # Only one retry is permitted. Keep the retry at 0 A and return to
+            # a known output-OFF state before trying to enable again.
+            keysight_set_current(KEYSIGHT_STARTUP_ZERO_CURRENT_A)
+            keysight_write('OUTP OFF')
+
+        if not verified:
+            raise RuntimeError(
+                'Keysight startup verification failed after '
+                f'{KEYSIGHT_STARTUP_ENABLE_ATTEMPTS} attempts (one retry); '
+                f'last status={last_status!r}'
+            )
+
+        requested_start_current = clamp(
+            float(KEYSIGHT_START_CURRENT_A),
+            KEYSIGHT_STARTUP_ZERO_CURRENT_A,
+            normal_current_cap_a(),
+        )
+        keysight_set_current(requested_start_current)
+
+        now = time.time()
+        keysight_state['startup_verified'] = True
+        keysight_state['startup_verified_at'] = now
+        keysight_state['automation_active'] = True
+        keysight_state['last_step_at'] = now
+        keysight_state['automation_started_at'] = now
+        keysight_state['reason_stopped'] = None
+        print_banner(
+            'KEYSIGHT STARTUP VERIFIED\n'
+            'Output was enabled and confirmed at 0.000 A before applying the '
+            f'{requested_start_current:.3f} A ramp start setpoint.\n'
+            f'OUTP verification attempts: {keysight_state["startup_attempts"]}.'
+        )
+
+    except Exception as exc:
+        keysight_state['startup_error'] = str(exc)
+        force_keysight_zero_output(f'Keysight startup failed: {exc}')
+        raise
+    finally:
+        keysight_state['startup_in_progress'] = False
 
 def stop_keysight_output(reason: str):
     force_keysight_zero_output(reason)
@@ -2443,6 +3016,8 @@ def phase_title_for_display(phase):
     return mapping.get(phase, str(phase).replace('_', ' '))
 
 def update_live_plot(snapshot, force_autoscale=False):
+    if USE_QT_PHASE13_DASHBOARD:
+        return
     global plot_refresh_counter
     plot_refresh_counter += 1
 
@@ -2713,10 +3288,18 @@ def monitor_qmb():
                             try:
                                 thickness_value = float(cropped_data)
                                 ts, formatted, dec = log_timestamp()
-                                with data_lock:
-                                    data[key]['thickness_times'].append(ts)
-                                    data[key]['thickness_data'].append(thickness_value)
-                                print(f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - {Fore.GREEN}{key} Thickness: {thickness_value} Å{Style.RESET_ALL}")
+                                decision = qmb_signal_guards[key].check_thickness(thickness_value, ts)
+                                if decision.accepted:
+                                    with data_lock:
+                                        data[key]['thickness_times'].append(ts)
+                                        data[key]['thickness_data'].append(thickness_value)
+                                    if key == 'CK-1 evaporator QMB':
+                                        with control_history_lock:
+                                            control_signal_history['thickness_times'].append(ts)
+                                            control_signal_history['thickness_data'].append(thickness_value)
+                                    print(f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - {Fore.GREEN}{key} Thickness: {thickness_value} Å{Style.RESET_ALL}")
+                                else:
+                                    record_qmb_rejection(key, 'thickness', thickness_value, decision)
                             except ValueError:
                                 print(f"{key}: Failed to parse thickness.")
                         last_request[key]['thickness'] = current_time
@@ -2730,10 +3313,18 @@ def monitor_qmb():
                             try:
                                 rate_value = float(cropped_data)
                                 ts, formatted, dec = log_timestamp()
-                                with data_lock:
-                                    data[key]['rate_times'].append(ts)
-                                    data[key]['rate_data'].append(rate_value)
-                                print(f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - {Fore.GREEN}{key} Rate: {rate_value} Å/s{Style.RESET_ALL}")
+                                decision = qmb_signal_guards[key].check_rate(rate_value)
+                                if decision.accepted:
+                                    with data_lock:
+                                        data[key]['rate_times'].append(ts)
+                                        data[key]['rate_data'].append(rate_value)
+                                    if key == 'CK-1 evaporator QMB':
+                                        with control_history_lock:
+                                            control_signal_history['rate_times'].append(ts)
+                                            control_signal_history['rate_data'].append(rate_value)
+                                    print(f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - {Fore.GREEN}{key} Rate: {rate_value} Å/s{Style.RESET_ALL}")
+                                else:
+                                    record_qmb_rejection(key, 'rate', rate_value, decision)
                             except ValueError:
                                 print(f"{key}: Failed to parse rate.")
                         last_request[key]['rate'] = current_time
@@ -2801,10 +3392,21 @@ def read_powersupply():
             ovp_tripped = protection.get('ovp_tripped')
 
             unexpected_output_off = (
-                output_on is False
+                keysight_state.get('startup_verified', False)
+                and not keysight_state.get('startup_in_progress', False)
+                and output_on is False
                 and expected_current > RAMPDOWN_ZERO_THRESHOLD_A
                 and current_phase() not in ('RAMP_DOWN', 'FINISHED', 'SAFETY_STOP')
             )
+
+            # A single stale/transitioning OUTP? response must not abort a run.
+            # Confirm once more before classifying an unexpected output-OFF.
+            if unexpected_output_off:
+                time.sleep(KEYSIGHT_OUTPUT_OFF_CONFIRM_DELAY_S)
+                confirmation = keysight_protection_status()
+                ocp_tripped = bool(ocp_tripped or confirmation.get('ocp_tripped') is True)
+                ovp_tripped = bool(ovp_tripped or confirmation.get('ovp_tripped') is True)
+                unexpected_output_off = confirmation.get('output_on') is False
 
             if ocp_tripped or ovp_tripped or unexpected_output_off:
                 reasons = []
@@ -3076,18 +3678,41 @@ def read_arduino():
 
 def reset_rate_pid(reason: str = ''):
     rate_pid_controller.reset()
+    reset_target = initial_cascade_target_c()
+    cascade_rate_controller.reset(
+        base_target_c=get_heating_trigger_temp_c(),
+        current_target_c=reset_target,
+        now_s=time.monotonic(),
+    )
+    cascade_inner_ready_tracker.reset()
     rate_pid_state['activated'] = False
     rate_pid_state['activated_at'] = None
     rate_pid_state['last_filtered_rate_a_per_s'] = None
     rate_pid_state['last_rate_timestamp'] = None
-    rate_pid_state['last_ready_sample_timestamp'] = None
-    rate_pid_state['ready_stable_reads'] = 0
+    rate_pid_state['last_valid_estimate_at'] = None
+    rate_pid_state['last_rate_estimate'] = None
+    rate_pid_state['last_rate_estimate_value'] = None
+    rate_pid_state['last_rate_estimate_sample_timestamp'] = None
     rate_pid_state['hard_stop_triggered'] = False
+    rate_pid_state['last_control_action_at'] = 0.0
+    rate_pid_state['last_outer_action_at'] = 0.0
+    rate_pid_state['last_outer_eval_at'] = 0.0
+    rate_pid_state['fast_excursion_since'] = None
+    rate_pid_state['last_fast_guard_action_at'] = 0.0
+    rate_pid_state['last_outer_delta_c'] = 0.0
+    rate_pid_state['last_outer_target_c'] = reset_target
+    rate_pid_state['cascade_inner_ready'] = False
+    rate_pid_state['cascade_inner_ready_elapsed_s'] = 0.0
+    rate_pid_state['cascade_thermal_response_pending'] = False
+    rate_pid_state['cascade_outer_freeze_reason'] = 'Waiting for inner temperature-loop qualification.'
+    rate_pid_state['cascade_temp_slope_c_per_min'] = None
+    rate_pid_state['cascade_rate_trend_a_per_s2'] = None
+    feedback_control_state['active_temperature_target_c'] = reset_target
     if reason:
         ts, formatted, dec = log_timestamp()
         print(
             f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - "
-            f"{Fore.CYAN}Rate PID reset: {reason}{Style.RESET_ALL}"
+            f"{Fore.CYAN}Rate/cascade control reset: {reason}{Style.RESET_ALL}"
         )
 
 
@@ -3128,12 +3753,30 @@ def rate_feedback_can_control(current_temp, filtered_rate):
         if float(filtered_rate) < activation_threshold:
             return False
         rate_pid_controller.reset()
+        handover_target = initial_cascade_target_c(current_temp)
+        cascade_rate_controller.reset(
+            base_target_c=get_heating_trigger_temp_c(),
+            current_target_c=handover_target,
+            now_s=time.monotonic(),
+        )
+        cascade_inner_ready_tracker.reset()
+        rate_pid_state['last_outer_delta_c'] = 0.0
+        rate_pid_state['last_outer_action_at'] = 0.0
+        rate_pid_state['last_outer_target_c'] = handover_target
+        rate_pid_state['cascade_inner_ready'] = False
+        rate_pid_state['cascade_inner_ready_elapsed_s'] = 0.0
+        rate_pid_state['cascade_thermal_response_pending'] = False
+        rate_pid_state['cascade_outer_freeze_reason'] = 'Handover: waiting for inner temperature-loop qualification.'
+        feedback_control_state['active_temperature_target_c'] = handover_target
+        reset_temperature_pid('rate feedback handover', handover_target)
         rate_pid_state['activated'] = True
         rate_pid_state['activated_at'] = time.time()
         print_banner(
             f"Rate feedback activated at T={float(current_temp):.2f} ºC and "
             f"filtered CK-1 rate={float(filtered_rate):.3f} Å/s.\n"
-            f"Selected mode: {evaporation_control_mode_label()}."
+            f"Selected mode: {evaporation_control_mode_label()}. "
+            f"Initial cascade temperature target={handover_target:.2f} ºC; "
+            f"outer settling={effective_rate_settling_s():.0f} s."
         )
     return True
 
@@ -3144,166 +3787,418 @@ def check_active_rate_signal_or_stop():
     age_s = latest_ck1_rate_age_s()
     if age_s is None or age_s > RATE_PID_SIGNAL_TIMEOUT_S:
         _rate_feedback_hard_stop(
-            'CK-1 rate feedback became unavailable or stale after control handover '
+            'CK-1 thickness feedback became unavailable or stale after control handover '
             f'(age={age_s if age_s is not None else "unknown"} s; '
             f'limit={RATE_PID_SIGNAL_TIMEOUT_S:.1f} s).'
+        )
+        return False
+
+    last_valid = rate_pid_state.get('last_valid_estimate_at')
+    invalid_for_s = None if last_valid is None else max(0.0, time.monotonic() - float(last_valid))
+    if invalid_for_s is None or invalid_for_s > RATE_PID_SIGNAL_TIMEOUT_S:
+        estimate = rate_pid_state.get('last_rate_estimate')
+        reason = getattr(estimate, 'reason', 'quality criterion not met') if estimate is not None else 'no estimate'
+        _rate_feedback_hard_stop(
+            'CK-1 robust thickness-slope estimate remained quality-invalid after control handover '
+            f'(invalid for {invalid_for_s if invalid_for_s is not None else "unknown"} s; '
+            f'limit={RATE_PID_SIGNAL_TIMEOUT_S:.1f} s; reason={reason}).'
         )
         return False
     return True
 
 
 def apply_rate_pid_control(current_temp, current_setpoint=None, filtered_rate=None):
+    """Conservative direct-current rate mode retained for diagnostics."""
     if filtered_rate is None:
         filtered_rate = filtered_ck1_rate()
     if filtered_rate is None:
         return False
-
     if current_setpoint is None:
         current_setpoint = keysight_state.get('set_current_a')
     if current_setpoint is None:
         current_setpoint = latest_value('Keysight power supply', 'current_data') or 0.0
 
-    mode = get_evaporation_control_mode()
-    now = time.time()
+    now_mono = time.monotonic()
+    if now_mono - rate_pid_state.get('last_control_action_at', 0.0) < effective_rate_settling_s():
+        set_active_feedback_controller('Direct rate PI settling hold')
+        log_control_decision(
+            mode='rate_direct', active_controller='Direct rate PI settling hold',
+            estimated_rate_a_per_s=filtered_rate,
+            current_before_a=current_setpoint, current_after_a=current_setpoint,
+            settling=True, integral_frozen=True, signal_valid=True,
+            reason='Waiting for thermal response to previous direct-rate action.',
+        )
+        return False
+
     decision = rate_pid_controller.update(
         target_rate=get_ck1_rate_target_a_per_s(),
         measured_rate=filtered_rate,
         current_setpoint_a=current_setpoint,
-        now_s=now,
-        # Both feedback modes block positive corrections at the ceiling. Compound
-        # mode additionally tapers them throughout the guard band.
+        now_s=now_mono,
         compound_temperature_guard=True,
         current_temperature_c=current_temp,
         maximum_temperature_c=RATE_CONTROL_MAX_TEMP_C,
-        temperature_guard_band_c=(COMPOUND_TEMP_GUARD_BAND_C if mode == CONTROL_MODE_COMPOUND else 0.0),
+        temperature_guard_band_c=0.0,
     )
     rate_pid_state['last_filtered_rate_a_per_s'] = float(filtered_rate)
     rate_pid_state['last_rate_timestamp'] = latest_ck1_rate_timestamp()
-    # Mark every PID evaluation, including a dead-band hold, so the configured
-    # control period is respected and the integral cannot update at GUI-loop speed.
+    now = time.time()
     keysight_state['last_step_at'] = now
+    set_active_feedback_controller('Direct rate PI diagnostic')
 
-    controller_label = 'Rate PID'
-    if decision.temperature_limited:
-        controller_label = 'Rate PID + temperature ceiling'
-    set_active_feedback_controller(controller_label)
-
-    if decision.inside_deadband or abs(decision.delta_a) < 1e-9:
-        if now - rate_pid_state.get('last_log_at', 0.0) >= 15.0:
-            extra = ' Temperature ceiling limited positive correction.' if decision.temperature_limited else ''
-            print(
-                f"Rate PID hold: filtered rate={filtered_rate:.3f} Å/s, "
-                f"target={get_ck1_rate_target_a_per_s():.3f} Å/s, "
-                f"dead band=±{RATE_PID_DEADBAND_A_PER_S:.3f} Å/s; "
-                f"holding current at {float(current_setpoint):.3f} A.{extra}"
-            )
-            rate_pid_state['last_log_at'] = now
-        return False
-
-    changed = nudge_keysight_current(
-        decision.delta_a,
-        (
-            f'Rate PID: filtered={filtered_rate:.3f} Å/s, '
-            f'target={get_ck1_rate_target_a_per_s():.3f} Å/s, '
-            f'error={decision.error_rate:+.3f} Å/s, '
-            f'P/I/D delta={decision.raw_delta_a:+.5f} A'
-            + ('; temperature ceiling limited increase' if decision.temperature_limited else '')
-        ),
-        max_current=KEYSIGHT_SOFT_WARNING_A,
-    )
+    before = float(current_setpoint)
+    changed = False
+    if abs(decision.delta_a) >= 1e-9:
+        changed = nudge_keysight_current(
+            decision.delta_a,
+            (
+                f'Direct rate PI: robust thickness-slope rate={filtered_rate:.3f} Å/s, '
+                f'target={get_ck1_rate_target_a_per_s():.3f} Å/s, '
+                f'error={decision.error_rate:+.3f} Å/s, requested={decision.raw_delta_a:+.5f} A'
+            ),
+            max_current=KEYSIGHT_SOFT_WARNING_A,
+        )
+    after = keysight_state.get('set_current_a')
+    applied = float(after) - before if after is not None else 0.0
     if changed:
-        keysight_state['last_step_at'] = now
+        rate_pid_state['last_control_action_at'] = now_mono
+    log_control_decision(
+        mode='rate_direct', active_controller='Direct rate PI diagnostic',
+        estimated_rate_a_per_s=filtered_rate, error=decision.error_rate,
+        requested_delta=decision.raw_delta_a, applied_delta=applied,
+        current_before_a=before, current_after_a=after,
+        inside_deadband=decision.inside_deadband,
+        temperature_limited=decision.temperature_limited,
+        signal_valid=True,
+        reason='Direct rate mode uses robust thickness-slope feedback.',
+    )
     return changed
 
-def reset_temperature_pid(reason: str = ''):
-    temperature_pid_state['integral_error_c_s'] = 0.0
-    temperature_pid_state['last_error_c'] = None
-    temperature_pid_state['last_time'] = None
-    if reason:
-        ts, formatted, dec = log_timestamp()
-        print(
-            f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - "
-            f"{Fore.CYAN}Temperature PID reset: {reason}{Style.RESET_ALL}"
+
+
+def cascade_inner_loop_snapshot(current_temp, target_temp, now_mono, rate_error):
+    """Qualify the inner thermal loop before the outer rate PI can stack actions.
+
+    Historical manual pre-refill runs show that CK-1 rate may continue moving
+    for several minutes after current or temperature changes.  The outer loop
+    therefore waits for the temperature PID to reach and stabilize at its
+    present target before requesting another same-direction increase.  High-rate
+    downward corrections remain available, but repeated downward actions are
+    held while the previous cooling response is still propagating.
+    """
+    temp_value = None if current_temp is None else float(current_temp)
+    target_value = float(target_temp)
+    temp_slope = estimate_ck1_temp_slope_c_per_min()
+    band_c = max(0.1, float(CASCADE_INNER_READY_TEMP_BAND_C))
+    slope_limit = max(0.01, effective_cascade_inner_temp_slope_limit_c_per_min())
+
+    condition = (
+        temp_value is not None
+        and temp_slope is not None
+        and abs(temp_value - target_value) <= band_c
+        and abs(float(temp_slope)) <= slope_limit
+    )
+    inner_ready = cascade_inner_ready_tracker.update(condition, now_mono)
+    inner_elapsed = cascade_inner_ready_tracker.elapsed(now_mono)
+
+    last_delta = float(rate_pid_state.get('last_outer_delta_c') or 0.0)
+    last_action_at = float(rate_pid_state.get('last_outer_action_at') or 0.0)
+    action_age = None if last_action_at <= 0.0 else max(0.0, now_mono - last_action_at)
+    pending = False
+    if (
+        action_age is not None
+        and action_age < effective_cascade_thermal_hold_max_s()
+        and abs(last_delta) > 1e-12
+        and temp_value is not None
+    ):
+        propagation_slope = max(0.05, slope_limit * 0.5)
+        if last_delta > 0.0:
+            pending = (
+                temp_value < target_value - band_c
+                or (temp_slope is not None and float(temp_slope) > propagation_slope)
+            )
+        else:
+            pending = (
+                temp_value > target_value + band_c
+                or (temp_slope is not None and float(temp_slope) < -propagation_slope)
+            )
+
+    deadband = effective_rate_deadband()
+    freeze_reason = ''
+    freeze_outer = False
+    # A low measured rate during warm-up is not a steady-state rate error.
+    # Never ratchet the temperature guide upward until the inner loop has
+    # demonstrated equilibrium around the current target.
+    if float(rate_error) > deadband and not inner_ready:
+        freeze_outer = True
+        freeze_reason = (
+            f'Inner temperature loop not qualified: |T-target| must be <= {band_c:.2f} ºC '
+            f'and |dT/dt| <= {slope_limit:.2f} ºC/min for '
+            f'{effective_cascade_inner_ready_stable_s():.0f} s.'
         )
 
+    # Do not repeat a correction in the same direction while its thermal
+    # response is visibly still propagating. Opposite-direction recovery is
+    # deliberately not blocked.
+    if pending and last_delta * float(rate_error) > 0.0:
+        freeze_outer = True
+        freeze_reason = (
+            f'Previous {last_delta:+.3f} ºC target action is still propagating '
+            f'(age={action_age:.0f} s, dT/dt={temp_slope if temp_slope is not None else float("nan"):+.3f} ºC/min).'
+        )
 
-def apply_temperature_pid_control(current_temp, current_setpoint=None, target_temp_override=None):
-    """Regulate Keysight current to hold CK-1 temperature around the live target."""
-    if current_temp is None:
+    rate_pid_state['cascade_inner_ready'] = bool(inner_ready)
+    rate_pid_state['cascade_inner_ready_elapsed_s'] = float(inner_elapsed)
+    rate_pid_state['cascade_thermal_response_pending'] = bool(pending)
+    rate_pid_state['cascade_outer_freeze_reason'] = freeze_reason
+    rate_pid_state['cascade_temp_slope_c_per_min'] = temp_slope
+    return {
+        'inner_ready': bool(inner_ready),
+        'inner_elapsed_s': float(inner_elapsed),
+        'temperature_slope_c_per_min': temp_slope,
+        'thermal_response_pending': bool(pending),
+        'last_action_age_s': action_age,
+        'freeze_outer': bool(freeze_outer),
+        'freeze_reason': freeze_reason,
+    }
+
+
+def apply_compound_cascade_control(current_temp, current_setpoint=None, filtered_rate=None):
+    """True cascade: rate PI adjusts T target; temperature PID adjusts current."""
+    if filtered_rate is None:
+        filtered_rate = filtered_ck1_rate()
+    if filtered_rate is None or current_temp is None:
+        set_active_feedback_controller('Cascade waiting for valid signals')
+        log_control_decision(
+            mode='compound_cascade', active_controller='Cascade signal hold',
+            current_before_a=current_setpoint, current_after_a=current_setpoint,
+            signal_valid=False, integral_frozen=True,
+            reason='Robust thickness-slope rate or filtered temperature unavailable.',
+        )
         return False
-
-    target_temp = get_heating_trigger_temp_c() if target_temp_override is None else float(target_temp_override)
-    band_c = get_pid_temp_band_c()
-    now = time.time()
-
     if current_setpoint is None:
         current_setpoint = keysight_state.get('set_current_a')
     if current_setpoint is None:
         current_setpoint = latest_value('Keysight power supply', 'current_data') or 0.0
 
-    error_c = target_temp - current_temp
+    now_mono = time.monotonic()
+    target_before = float(cascade_rate_controller.target)
+    rate_error = get_ck1_rate_target_a_per_s() - float(filtered_rate)
+    inner = cascade_inner_loop_snapshot(
+        current_temp,
+        target_before,
+        now_mono,
+        rate_error,
+    )
 
-    last_time = temperature_pid_state['last_time']
-    last_error = temperature_pid_state['last_error_c']
-    if last_time is None or last_error is None:
-        temperature_pid_state['last_time'] = now
-        temperature_pid_state['last_error_c'] = error_c
-        temperature_pid_state['integral_error_c_s'] = 0.0
+    if now_mono - rate_pid_state.get('last_outer_eval_at', 0.0) >= RATE_PID_CONTROL_PERIOD_S:
+        trend = estimate_ck1_rate_trend_per_s()
+        rate_pid_state['cascade_rate_trend_a_per_s2'] = trend
+        outer = cascade_rate_controller.update(
+            target_rate=get_ck1_rate_target_a_per_s(),
+            measured_rate=filtered_rate,
+            rate_trend_per_s=trend,
+            base_target_c=get_heating_trigger_temp_c(),
+            max_temp_c=RATE_CONTROL_MAX_TEMP_C,
+            now_s=now_mono,
+            deadband_rate=effective_rate_deadband(),
+            freeze=inner['freeze_outer'],
+        )
+        rate_pid_state['last_outer_eval_at'] = now_mono
+        rate_pid_state['last_filtered_rate_a_per_s'] = float(filtered_rate)
+        rate_pid_state['last_rate_timestamp'] = latest_ck1_rate_timestamp()
+        feedback_control_state['active_temperature_target_c'] = outer.target_c
+
+        if abs(outer.delta_c) > 1e-9:
+            rate_pid_state['last_control_action_at'] = now_mono
+            rate_pid_state['last_outer_action_at'] = now_mono
+            rate_pid_state['last_outer_delta_c'] = float(outer.delta_c)
+            rate_pid_state['last_outer_target_c'] = float(outer.target_c)
+            cascade_inner_ready_tracker.reset()
+            rate_pid_state['cascade_inner_ready'] = False
+            rate_pid_state['cascade_inner_ready_elapsed_s'] = 0.0
+            # Derivative is calculated on measurement, so a small slew-limited
+            # setpoint change does not require resetting the inner PID. Keeping
+            # its state avoids repeated loss of integral memory every outer step.
+
+        if inner['freeze_outer']:
+            decision_reason = inner['freeze_reason']
+        elif outer.settling:
+            decision_reason = 'Minimum post-action settling interval remains active.'
+        elif outer.trend_hold:
+            decision_reason = 'Robust rate is already moving toward target; no further target action.'
+        else:
+            decision_reason = 'Outer rate PI evaluated the CK-1 temperature target.'
+
+        log_control_decision(
+            mode='compound_outer', active_controller='Cascade outer rate PI',
+            estimated_rate_a_per_s=filtered_rate,
+            active_temperature_target_c=outer.target_c,
+            error=outer.error_rate, p_term=outer.p_c, i_term=outer.i_c,
+            requested_delta=outer.raw_delta_c, applied_delta=outer.delta_c,
+            inside_deadband=outer.inside_deadband, integral_frozen=outer.integral_frozen,
+            current_or_target_limited=outer.limited,
+            settling=outer.settling, trend_hold=outer.trend_hold,
+            signal_valid=True,
+            temperature_slope_c_per_min=inner['temperature_slope_c_per_min'],
+            rate_trend_a_per_s2=trend,
+            inner_loop_ready=inner['inner_ready'],
+            inner_ready_elapsed_s=inner['inner_elapsed_s'],
+            thermal_response_pending=inner['thermal_response_pending'],
+            last_outer_action_age_s=inner['last_action_age_s'],
+            outer_freeze_reason=inner['freeze_reason'],
+            reason=decision_reason,
+        )
+
+    target_temp = float(cascade_rate_controller.target)
+    feedback_control_state['active_temperature_target_c'] = target_temp
+    set_active_feedback_controller('Cascade rate PI → temperature PID')
+    return apply_temperature_pid_control(current_temp, current_setpoint, target_temp_override=target_temp)
+
+
+def apply_fast_rate_excursion_guard(current_setpoint=None):
+    """Separate exceptional guard for a sustained instantaneous high rate."""
+    fast_rate = fast_filtered_ck1_rate()
+    if fast_rate is None:
+        rate_pid_state['fast_excursion_since'] = None
         return False
+    threshold = get_ck1_rate_target_a_per_s() * FAST_RATE_EXCURSION_FACTOR
+    now_mono = time.monotonic()
+    if fast_rate <= threshold:
+        rate_pid_state['fast_excursion_since'] = None
+        return False
+    if rate_pid_state.get('fast_excursion_since') is None:
+        rate_pid_state['fast_excursion_since'] = now_mono
+        return False
+    if now_mono - rate_pid_state['fast_excursion_since'] < FAST_RATE_EXCURSION_DURATION_S:
+        return False
+    if now_mono - rate_pid_state.get('last_fast_guard_action_at', 0.0) < effective_rate_settling_s():
+        return False
+    if current_setpoint is None:
+        current_setpoint = keysight_state.get('set_current_a') or 0.0
+    before = float(current_setpoint)
+    changed = nudge_keysight_current(
+        -abs(FAST_RATE_EXCURSION_CURRENT_STEP_A),
+        f'Fast rate excursion guard: sustained {fast_rate:.3f} Å/s > {threshold:.3f} Å/s',
+        max_current=KEYSIGHT_SOFT_WARNING_A,
+    )
+    after = keysight_state.get('set_current_a')
+    rate_pid_state['last_fast_guard_action_at'] = now_mono
+    rate_pid_state['last_control_action_at'] = now_mono
+    rate_pid_state['fast_excursion_since'] = now_mono
+    reset_temperature_pid('fast-rate guard current reduction', active_temperature_target_c())
+    log_control_decision(
+        mode='fast_rate_guard', active_controller='Fast rate excursion guard',
+        raw_qmb_rate_a_per_s=fast_rate,
+        current_before_a=before, current_after_a=after,
+        requested_delta=-abs(FAST_RATE_EXCURSION_CURRENT_STEP_A),
+        applied_delta=(float(after) - before if after is not None else 0.0),
+        settling=True, signal_valid=True,
+        reason=f'Sustained fast rate exceeded {threshold:.3f} Å/s.',
+    )
+    return changed
 
-    dt = max(0.1, now - last_time)
 
-    # Inside the safe band, do not chase noise. Keep the present current and
-    # slowly discharge the integral term to avoid wind-up.
-    if abs(error_c) <= band_c:
-        temperature_pid_state['integral_error_c_s'] *= 0.90
-        temperature_pid_state['last_time'] = now
-        temperature_pid_state['last_error_c'] = error_c
+def reset_temperature_pid(reason: str = '', target_temp_override=None):
+    target = get_heating_trigger_temp_c() if target_temp_override is None else float(target_temp_override)
+    measurement = latest_control_ck1_temperature()
+    temperature_pid_controller.reset(
+        now_s=time.monotonic(),
+        measurement_c=measurement,
+        target_c=target,
+        bumpless=True,
+    )
+    temperature_pid_state['last_target_c'] = target
+    temperature_pid_state['last_mode'] = get_evaporation_control_mode()
+    if reason:
+        ts, formatted, dec = log_timestamp()
+        print(
+            f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - "
+            f"{Fore.CYAN}Temperature PID reset bumplessly: {reason}{Style.RESET_ALL}"
+        )
 
+
+def apply_temperature_pid_control(current_temp, current_setpoint=None, target_temp_override=None):
+    """Regulate Keysight current from median-filtered CK-1 temperature."""
+    if current_temp is None:
+        return False
+    target_temp = get_heating_trigger_temp_c() if target_temp_override is None else float(target_temp_override)
+    feedback_control_state['active_temperature_target_c'] = target_temp
+    if current_setpoint is None:
+        current_setpoint = keysight_state.get('set_current_a')
+    if current_setpoint is None:
+        current_setpoint = latest_value('Keysight power supply', 'current_data') or 0.0
+
+    last_target = temperature_pid_state.get('last_target_c')
+    last_mode = temperature_pid_state.get('last_mode')
+    if last_target is None or last_mode != get_evaporation_control_mode():
+        reset_temperature_pid('controller handover', target_temp)
+        return False
+    if abs(float(last_target) - target_temp) > 0.05:
+        # Retarget without resetting: derivative-on-measurement prevents kick,
+        # and the outer loop already limits target movement to a slow slew.
+        temperature_pid_state['last_target_c'] = target_temp
+
+    decision = temperature_pid_controller.update(
+        target_c=target_temp,
+        measurement_c=float(current_temp),
+        current_a=float(current_setpoint),
+        now_s=time.monotonic(),
+        deadband_c=get_pid_temp_band_c(),
+    )
+    temperature_pid_state['last_target_c'] = target_temp
+    temperature_pid_state['last_mode'] = get_evaporation_control_mode()
+    # Mark every evaluation, including dead-band holds, so integration and
+    # derivative updates never run at GUI-loop speed.
+    keysight_state['last_step_at'] = time.time()
+
+    if decision.inside_deadband or abs(decision.delta_a) < 1e-9:
+        now = time.time()
         if now - temperature_pid_state.get('last_log_at', 0.0) >= 15.0:
-            ts, formatted, dec = log_timestamp()
             print(
-                f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - "
-                f"{Fore.YELLOW}Temperature PID hold: T={current_temp:.2f} ºC, "
-                f"target={target_temp:.2f} ºC, band=±{band_c:.2f} ºC; "
-                f"holding current at {current_setpoint:.3f} A{Style.RESET_ALL}"
+                f"Temperature PID hold: filtered T={float(current_temp):.2f} ºC, "
+                f"target={target_temp:.2f} ºC, band=±{get_pid_temp_band_c():.2f} ºC; "
+                f"current={float(current_setpoint):.3f} A."
             )
             temperature_pid_state['last_log_at'] = now
+        log_control_decision(
+            mode='temperature_inner', active_controller='Temperature PID hold',
+            control_temperature_c=current_temp, active_temperature_target_c=target_temp,
+            error=decision.error_c, p_term=decision.p_a, i_term=decision.i_a, d_term=decision.d_a,
+            requested_delta=decision.raw_delta_a, applied_delta=0.0,
+            current_before_a=current_setpoint, current_after_a=current_setpoint,
+            inside_deadband=decision.inside_deadband, integral_frozen=decision.integral_frozen,
+            slew_or_step_limited=decision.slew_limited,
+            current_or_target_limited=decision.current_limited,
+            signal_valid=True, reason='Temperature PID hold/no effective correction.',
+        )
         return False
 
-    integral = temperature_pid_state['integral_error_c_s'] + error_c * dt
-    integral = clamp(integral, -PID_INTEGRAL_LIMIT_C_S, PID_INTEGRAL_LIMIT_C_S)
-    derivative = (error_c - last_error) / dt
-
-    raw_delta_a = (
-        PID_KP_A_PER_C * error_c
-        + PID_KI_A_PER_C_S * integral
-        + PID_KD_A_PER_C_PER_S * derivative
-    )
-    delta_a = clamp(raw_delta_a, -PID_MAX_STEP_A, PID_MAX_STEP_A)
-
-    # Avoid asking for impossible tiny changes after clamping/rounding.
-    if abs(delta_a) < 1e-6:
-        temperature_pid_state['integral_error_c_s'] = integral
-        temperature_pid_state['last_time'] = now
-        temperature_pid_state['last_error_c'] = error_c
-        return False
-
+    before = float(current_setpoint)
     changed = nudge_keysight_current(
-        delta_a,
+        decision.delta_a,
         (
-            f'Temperature PID: T={current_temp:.2f} ºC, target={target_temp:.2f} ºC, '
-            f'error={error_c:+.2f} ºC, P/I/D delta={raw_delta_a:+.5f} A'
+            f'Temperature PID professional: filtered T={float(current_temp):.2f} ºC, '
+            f'target={target_temp:.2f} ºC, error={decision.error_c:+.2f} ºC, '
+            f'P={decision.p_a:+.5f}, I={decision.i_a:+.5f}, D={decision.d_a:+.5f} A'
         ),
         max_current=KEYSIGHT_SOFT_WARNING_A,
     )
-
+    after = keysight_state.get('set_current_a')
     if changed:
-        keysight_state['last_step_at'] = now
-
-    temperature_pid_state['integral_error_c_s'] = integral
-    temperature_pid_state['last_time'] = now
-    temperature_pid_state['last_error_c'] = error_c
+        keysight_state['last_step_at'] = time.time()
+    log_control_decision(
+        mode='temperature_inner', active_controller='Temperature PID',
+        control_temperature_c=current_temp, active_temperature_target_c=target_temp,
+        error=decision.error_c, p_term=decision.p_a, i_term=decision.i_a, d_term=decision.d_a,
+        requested_delta=decision.raw_delta_a,
+        applied_delta=(float(after) - before if after is not None else 0.0),
+        current_before_a=before, current_after_a=after,
+        inside_deadband=decision.inside_deadband, integral_frozen=decision.integral_frozen,
+        slew_or_step_limited=decision.slew_limited,
+        current_or_target_limited=decision.current_limited,
+        signal_valid=True, reason='Professional temperature PID decision.',
+    )
     return changed
 
 
@@ -3369,7 +4264,7 @@ def _temperature_watchdog_soft_action(current_temp: float, soft_limit: float, ta
             "TEMPERATURE WATCHDOG SOFT ACTION\n"
             f"CK-1 temperature {current_temp:.2f} ºC is above soft limit {soft_limit:.2f} ºC.\n"
             f"Forced current reduction by up to {TEMP_WATCHDOG_SOFT_STEP_A:.3f} A.\n"
-            f"Hard stop remains at target + {TEMP_WATCHDOG_HARD_MARGIN_C:.1f} ºC."
+            f"Absolute watchdog hard stop remains at {TEMP_WATCHDOG_MAX_TEMP_C:.1f} ºC."
         )
         temperature_watchdog_state['last_log_at'] = now
 
@@ -3390,7 +4285,7 @@ def temperature_safety_watchdog():
             now = time.time()
             target_temp = get_temperature_watchdog_reference_c()
             soft_limit = target_temp + TEMP_WATCHDOG_SOFT_MARGIN_C
-            hard_limit = target_temp + TEMP_WATCHDOG_HARD_MARGIN_C
+            hard_limit = float(TEMP_WATCHDOG_MAX_TEMP_C)
             current_temp = latest_ck1_temperature()
             temp_timestamp = latest_ck1_temperature_timestamp()
             temp_age_s = latest_ck1_temperature_age_s()
@@ -3443,7 +4338,7 @@ def temperature_safety_watchdog():
                 _temperature_watchdog_hard_stop(
                     'CK-1 temperature watchdog: hard limit exceeded '
                     f'({float(current_temp):.2f} ºC >= {hard_limit:.2f} ºC; '
-                    f'target={target_temp:.2f} ºC).'
+                    f'watchdog maximum={TEMP_WATCHDOG_MAX_TEMP_C:.2f} ºC; reference={target_temp:.2f} ºC).'
                 )
                 continue
 
@@ -3460,21 +4355,22 @@ def automate_keysight_heating():
         return
 
     try:
-        configure_keysight_for_automation()
+        if not keysight_state.get('startup_verified'):
+            raise RuntimeError('Keysight automation started before zero-current output verification')
         initial_ramp = get_live_ramp_settings()
         print_banner(
             f"Keysight automation started with feedback mode: {evaporation_control_mode_label()}.\n"
-            f"Warm-up uses {ramp_mode_label(initial_ramp['mode'])}; rate/compound modes hand over "
-            f"after T >= {RATE_PID_MIN_CONTROL_TEMP_C:.1f} ºC and filtered rate reaches "
-            f"{RATE_PID_ACTIVATION_A_PER_S:.3f} Å/s (or half of a lower target).\n"
-            f"Temperature PID target / guide: {get_heating_trigger_temp_c():.1f} ºC. "
-            f"Rate-control ceiling: {RATE_CONTROL_MAX_TEMP_C:.1f} ºC.\n"
-            f"Normal current cap: {KEYSIGHT_SOFT_WARNING_A:.3f} A. "
-            f"Software hard current stop: {KEYSIGHT_HARD_STOP_A:.3f} A. "
-            f"Keysight OCP latch: {KEYSIGHT_INSTRUMENT_OCP_A:.3f} A.\n"
-            f"Voltage compliance limit: {KEYSIGHT_VOLTAGE_LIMIT_V:.3f} V. "
-            f"Software hard voltage stop: {KEYSIGHT_HARD_STOP_V:.3f} V. "
-            f"Keysight OVP latch: {KEYSIGHT_INSTRUMENT_OVP_V:.3f} V."
+            f"Warm-up uses {ramp_mode_label(initial_ramp['mode'])}. Rate/compound handover requires "
+            f"T >= {RATE_PID_MIN_CONTROL_TEMP_C:.1f} ºC and a valid robust thickness-slope rate.\n"
+            f"Molecule profile: {MOLECULE_CONDITION_PROFILE}. "
+            f"Rate estimator: {RATE_ESTIMATOR_WINDOW_S:.0f} s window, "
+            f"minimum {RATE_ESTIMATOR_MIN_POINTS} points / {RATE_ESTIMATOR_MIN_SPAN_S:.0f} s.\n"
+            f"Compound architecture: rate PI -> temperature target -> temperature PID -> current.\n"
+            f"Temperature guide: {get_heating_trigger_temp_c():.1f} ºC; "
+            f"rate-control ceiling: {RATE_CONTROL_MAX_TEMP_C:.1f} ºC; "
+            f"watchdog maximum: {TEMP_WATCHDOG_MAX_TEMP_C:.1f} ºC.\n"
+            f"Current cap {KEYSIGHT_SOFT_WARNING_A:.3f} A; software hard stop "
+            f"{KEYSIGHT_HARD_STOP_A:.3f} A; Keysight OCP {KEYSIGHT_INSTRUMENT_OCP_A:.3f} A."
         )
 
         active_phases = ('HEATING_UP', 'WAIT_SHUTTER_OPEN', 'CALIBRATION', 'WAIT_SHUTTER_CLOSE')
@@ -3484,12 +4380,12 @@ def automate_keysight_heating():
                 set_active_feedback_controller('Inactive')
                 time.sleep(0.5)
                 continue
-
             if not keysight_state['automation_active']:
                 time.sleep(0.5)
                 continue
 
-            current_temp = latest_ck1_temperature()
+            raw_temp = latest_ck1_temperature()
+            current_temp = latest_control_ck1_temperature()
             ck1_rate_avg = average_ck1_rate()
             filtered_rate = filtered_ck1_rate()
             current_setpoint = keysight_state['set_current_a']
@@ -3503,80 +4399,137 @@ def automate_keysight_heating():
                 stop_event.set()
                 time.sleep(1)
                 continue
-
             if current_setpoint > KEYSIGHT_SOFT_WARNING_A:
                 keysight_set_current(KEYSIGHT_SOFT_WARNING_A)
                 current_setpoint = KEYSIGHT_SOFT_WARNING_A
 
             if current_setpoint >= KEYSIGHT_SOFT_WARNING_A - 1e-9:
-                now = time.time()
-                if now - keysight_state.get('last_soft_cap_warning_at', 0.0) >= 15.0:
-                    ts, formatted, dec = log_timestamp()
+                now_epoch = time.time()
+                if now_epoch - keysight_state.get('last_soft_cap_warning_at', 0.0) >= 15.0:
                     print(
-                        f"{formatted}.{Fore.LIGHTBLACK_EX}{dec}{Style.RESET_ALL} - "
-                        f"{Fore.YELLOW}Soft current cap active: holding at "
-                        f"{current_setpoint:.3f} A. Hard stop remains "
-                        f"{KEYSIGHT_HARD_STOP_A:.3f} A.{Style.RESET_ALL}"
+                        f"Soft current cap active: holding at {current_setpoint:.3f} A. "
+                        f"Hard stop remains {KEYSIGHT_HARD_STOP_A:.3f} A."
                     )
-                    keysight_state['last_soft_cap_warning_at'] = now
+                    keysight_state['last_soft_cap_warning_at'] = now_epoch
 
             if manual_current_is_enabled():
                 set_active_feedback_controller('Manual current')
-                now = time.time()
-                with manual_current_lock:
-                    last_log = manual_current_state.get('last_hold_log_at', 0.0)
-                    if now - last_log >= 15.0:
-                        manual_current_state['last_hold_log_at'] = now
-                        should_log_manual_hold = True
-                    else:
-                        should_log_manual_hold = False
-                if should_log_manual_hold:
-                    print(
-                        f"Manual Keysight current control is active: automatic ramp/PID corrections "
-                        f"are paused; holding software setpoint at {keysight_state.get('set_current_a')} A."
-                    )
-                keysight_state['last_step_at'] = now
+                reset_temperature_pid('manual-current handover', active_temperature_target_c())
                 time.sleep(0.5)
                 continue
 
-            mode = get_evaporation_control_mode()
-            now = time.time()
-            control_period_s = PID_CONTROL_PERIOD_S if mode == CONTROL_MODE_TEMPERATURE else RATE_PID_CONTROL_PERIOD_S
-            if now - keysight_state['last_step_at'] < control_period_s:
+            mode, mode_generation = get_evaporation_control_mode_snapshot()
+            if mode in {CONTROL_MODE_RATE, CONTROL_MODE_COMPOUND} and rate_pid_state.get('activated'):
+                if run_feedback_mode_action(
+                    mode,
+                    mode_generation,
+                    apply_fast_rate_excursion_guard,
+                    current_setpoint,
+                ):
+                    keysight_state['last_step_at'] = time.time()
+                    time.sleep(0.5)
+                    continue
+
+            now_epoch = time.time()
+            control_period_s = RATE_PID_CONTROL_PERIOD_S if mode == CONTROL_MODE_RATE else PID_CONTROL_PERIOD_S
+            if now_epoch - keysight_state['last_step_at'] < control_period_s:
                 time.sleep(0.5)
+                continue
+            if not feedback_mode_is_current(mode, mode_generation):
+                time.sleep(0.1)
                 continue
 
             if mode == CONTROL_MODE_TEMPERATURE:
-                set_active_feedback_controller('Temperature PID' if phase != 'HEATING_UP' or should_use_temperature_pid(current_temp) else 'Warm-up ramp')
-                if phase != 'HEATING_UP':
-                    apply_temperature_pid_control(current_temp, current_setpoint)
-                    time.sleep(0.5)
-                    continue
-                if should_use_temperature_pid(current_temp):
-                    apply_temperature_pid_control(current_temp, current_setpoint)
+                set_active_feedback_controller(
+                    'Temperature PID' if phase != 'HEATING_UP' or should_use_temperature_pid(current_temp)
+                    else 'Warm-up ramp'
+                )
+                if phase != 'HEATING_UP' or should_use_temperature_pid(current_temp):
+                    run_feedback_mode_action(
+                        mode,
+                        mode_generation,
+                        apply_temperature_pid_control,
+                        current_temp,
+                        current_setpoint,
+                    )
                     time.sleep(0.5)
                     continue
                 if heating_ready_for_shutter(current_temp, ck1_rate_avg):
+                    keysight_state['last_step_at'] = now_epoch
                     time.sleep(0.5)
                     continue
             else:
-                if not check_active_rate_signal_or_stop():
+                signal_ok = run_feedback_mode_action(
+                    mode,
+                    mode_generation,
+                    check_active_rate_signal_or_stop,
+                )
+                if signal_ok is None:
+                    time.sleep(0.1)
+                    continue
+                if not signal_ok:
                     time.sleep(0.5)
                     continue
-                if rate_feedback_can_control(current_temp, filtered_rate):
-                    apply_rate_pid_control(current_temp, current_setpoint, filtered_rate)
+                can_control = run_feedback_mode_action(
+                    mode,
+                    mode_generation,
+                    rate_feedback_can_control,
+                    current_temp,
+                    filtered_rate,
+                )
+                if can_control is None:
+                    time.sleep(0.1)
+                    continue
+                if can_control:
+                    if mode == CONTROL_MODE_COMPOUND:
+                        run_feedback_mode_action(
+                            mode,
+                            mode_generation,
+                            apply_compound_cascade_control,
+                            current_temp,
+                            current_setpoint,
+                            filtered_rate,
+                        )
+                    else:
+                        run_feedback_mode_action(
+                            mode,
+                            mode_generation,
+                            apply_rate_pid_control,
+                            current_temp,
+                            current_setpoint,
+                            filtered_rate,
+                        )
+                    time.sleep(0.5)
+                    continue
+                if rate_pid_state.get('activated'):
+                    if mode == CONTROL_MODE_COMPOUND:
+                        # Keep the inner thermal loop stable at the last valid
+                        # target while a quality-valid rate estimate is rebuilt.
+                        set_active_feedback_controller('Cascade rate signal hold; temperature PID active')
+                        run_feedback_mode_action(
+                            mode,
+                            mode_generation,
+                            apply_temperature_pid_control,
+                            current_temp,
+                            current_setpoint,
+                            target_temp_override=active_temperature_target_c(),
+                        )
+                    else:
+                        set_active_feedback_controller('Direct rate signal hold')
+                        keysight_state['last_step_at'] = now_epoch
                     time.sleep(0.5)
                     continue
                 if phase != 'HEATING_UP':
-                    # A rate-controlled deposition phase must never resume warm-up
-                    # ramping after handover. Hold current until the next valid rate
-                    # sample, and the timeout above will stop safely if it remains lost.
-                    set_active_feedback_controller('Rate signal hold')
+                    set_active_feedback_controller('Rate handover not established; current hold')
+                    keysight_state['last_step_at'] = now_epoch
                     time.sleep(0.5)
                     continue
                 if current_temp is not None and float(current_temp) >= RATE_CONTROL_MAX_TEMP_C:
-                    set_active_feedback_controller('Temperature ceiling hold')
-                    apply_temperature_pid_control(
+                    set_active_feedback_controller('Temperature ceiling hold before rate handover')
+                    run_feedback_mode_action(
+                        mode,
+                        mode_generation,
+                        apply_temperature_pid_control,
                         current_temp,
                         current_setpoint,
                         target_temp_override=RATE_CONTROL_MAX_TEMP_C,
@@ -3587,30 +4540,25 @@ def automate_keysight_heating():
 
             maybe_auto_switch_steps_to_slope(current_temp)
             step_period_s = current_ramp_step_period_s(current_temp, current_setpoint)
-            if now - keysight_state['last_step_at'] < step_period_s:
+            if now_epoch - keysight_state['last_step_at'] < step_period_s:
                 time.sleep(0.5)
                 continue
-
             if should_use_steps_ramp(current_temp):
                 settings = get_live_ramp_settings()
+                temp_text = '--' if current_temp is None else f'{float(current_temp):.2f}'
                 nudge_keysight_current(
                     +KEYSIGHT_STEP_A,
-                    (
-                        f'Steps ramp up mode: fixed step; CK-1 temp '
-                        f'{current_temp if current_temp is not None else "--"} ºC '
-                        f'< {settings["steps_until_temp_c"]:.1f} ºC'
-                    ),
+                    f'Steps ramp: filtered CK-1 T={temp_text} ºC < {settings["steps_until_temp_c"]:.1f} ºC',
                     max_current=KEYSIGHT_SOFT_WARNING_A,
                 )
             else:
                 apply_temperature_slope_control(current_setpoint)
-
             keysight_state['last_step_at'] = time.time()
             time.sleep(0.5)
 
     except Exception as e:
         print(f'Error in Keysight automation: {e}')
-        stop_event.set()
+        emergency_keysight_shutdown(f'Keysight automation failure: {e}')
 
 def process_controller():
     print_banner(
@@ -3621,7 +4569,7 @@ def process_controller():
 
     while not stop_event.is_set():
         phase = current_phase()
-        ck1_temp = latest_ck1_temperature()
+        ck1_temp = latest_control_ck1_temperature()
         ck1_thickness = latest_ck1_thickness()
         sample_thickness = latest_sample_thickness()
 
@@ -3641,20 +4589,12 @@ def process_controller():
         if phase == 'HEATING_UP':
             trigger_reason = None
             if heating_ready_for_shutter(ck1_temp, ck1_rate_avg):
-                if get_evaporation_control_mode() == CONTROL_MODE_TEMPERATURE:
-                    trigger_reason = (
-                        f'CK-1 temperature reached {ck1_temp:.1f} ºC and average CK-1 rate reached '
-                        f'>= {get_ck1_rate_target_a_per_s():.2f} Å/s '
-                        f'(measured {ck1_rate_avg:.2f} Å/s).'
-                    )
-                else:
-                    filtered_rate = filtered_ck1_rate()
-                    trigger_reason = (
-                        f'{evaporation_control_mode_label()} stabilized the filtered CK-1 rate '
-                        f'inside {get_ck1_rate_low_a_per_s():.2f}-{get_ck1_rate_high_a_per_s():.2f} Å/s '
-                        f'for {RATE_PID_READY_STABLE_READS} consecutive QMB readings '
-                        f'(measured {filtered_rate:.3f} Å/s; CK-1 T={ck1_temp:.1f} ºC).'
-                    )
+                trigger_reason = (
+                    f'Process targets reached: CK-1 T={float(ck1_temp):.2f} ºC >= '
+                    f'{get_heating_trigger_temp_c():.2f} ºC and average CK-1 rate='
+                    f'{float(ck1_rate_avg):.3f} Å/s >= {get_ck1_rate_target_a_per_s():.3f} Å/s. '
+                    f'Feedback mode: {evaporation_control_mode_label()}.'
+                )
 
             if trigger_reason is not None:
                 request_snapshot('heating_end')
@@ -3679,7 +4619,12 @@ def process_controller():
         elif phase == 'CALIBRATION':
             sample_rel = relative_sample_thickness()
             if sample_rel is not None and sample_rel >= CALIBRATION_TARGET_SAMPLE_A:
-                thickness_ratio = calculate_thickness_ratio()
+                calibration_result = calculate_calibration_result()
+                thickness_ratio = calibration_result.get('ratio')
+                process_state['calibration_result'] = calibration_result
+                process_state['calibration_quality_status'] = (
+                    'PASS' if calibration_result.get('quality_pass') else 'REVIEW / REPEAT RECOMMENDED'
+                )
                 process_state['final_thickness_ratio'] = thickness_ratio
                 request_snapshot('calibration_end')
                 save_phase_summary('calibration_end')
@@ -3687,8 +4632,13 @@ def process_controller():
                 ratio_message = 'Thickness ratio could not be calculated.'
                 if thickness_ratio is not None:
                     ratio_message = (
-                        f'Thickness ratio (CK-1 relative / Sample relative) = {thickness_ratio:.2f}'
+                        f'Exact-crossing thickness ratio (CK-1 / Sample at '
+                        f'{float(CALIBRATION_TARGET_SAMPLE_A):.3f} Å) = {thickness_ratio:.3f}\n'
+                        f'QMB linearity R² = {calibration_result.get("linearity_r2")}\n'
+                        f'{calibration_result.get("quality_message")}'
                     )
+                else:
+                    ratio_message += f' {calibration_result.get("quality_message")}'
 
                 with state_lock:
                     # Force a fresh close confirmation after the target-reached warning.
@@ -3795,8 +4745,182 @@ def user_command_listener():
         elif command:
             print("Commands: 'o' = shutter open, 'c' = shutter closed, 's' = save snapshot, 'r' = show thickness ratio, 'h' = show live targets, 'q' = stop")
 
+
+# _____________________FAST QT DASHBOARD ADAPTER_______________________________
+def qt_set_feedback_mode(mode):
+    set_evaporation_control_mode(mode, 'PySide6 GUI live controller selection')
+
+
+def qt_apply_heating_targets(trigger_temp_c, rate_target_a_per_s, pid_temp_band_c):
+    set_live_heating_targets(trigger_temp_c, rate_target_a_per_s, pid_temp_band_c)
+
+
+def qt_reset_heating_targets():
+    defaults = DEFAULT_LIVE_HEATING_TARGETS
+    set_live_heating_targets(
+        defaults['trigger_temp_c'],
+        defaults['rate_target_a_per_s'],
+        defaults['pid_temp_band_c'],
+    )
+
+
+def qt_apply_ramp_settings(mode, steps_until_temp_c, steps_step_period_s,
+                           slope_early_c_per_min, slope_mid_c_per_min,
+                           slope_late_c_per_min):
+    set_live_ramp_settings(
+        mode=mode,
+        steps_until_temp_c=steps_until_temp_c,
+        steps_step_period_s=steps_step_period_s,
+        slope_early_c_per_min=slope_early_c_per_min,
+        slope_mid_c_per_min=slope_mid_c_per_min,
+        slope_late_c_per_min=slope_late_c_per_min,
+    )
+
+
+def qt_reset_ramp_settings():
+    defaults = DEFAULT_LIVE_RAMP_SETTINGS
+    set_live_ramp_settings(
+        mode=defaults['mode'],
+        steps_until_temp_c=defaults['steps_until_temp_c'],
+        steps_step_period_s=defaults['steps_step_period_s'],
+        slope_early_c_per_min=defaults['slope_early_c_per_min'],
+        slope_mid_c_per_min=defaults['slope_mid_c_per_min'],
+        slope_late_c_per_min=defaults['slope_late_c_per_min'],
+    )
+
+
+def qt_set_manual_current(requested_current_a):
+    apply_manual_current_value(requested_current_a, 'PySide6 GUI manual current control')
+
+
+def qt_resume_automatic_current():
+    set_manual_current_enabled(False, 'PySide6 GUI Auto current button')
+
+
+def qt_open_shutter():
+    confirm_shutter_open('PySide6 GUI button')
+
+
+def qt_close_shutter():
+    confirm_shutter_closed('PySide6 GUI button')
+
+
+def _qt_last_action_text():
+    with live_action_status_lock:
+        return str(live_action_status_text)
+
+
+def _qt_shutter_status():
+    with state_lock:
+        shutter_open = process_state.get('shutter_open_confirmed', False)
+        shutter_closed = process_state.get('shutter_close_confirmed', False)
+    if shutter_open:
+        return 'OPEN confirmed'
+    if shutter_closed:
+        return 'CLOSED confirmed'
+    return 'not confirmed'
+
+
+def _qt_value_line(label, value, fmt, unit=''):
+    if value is None:
+        return f'{label}: --'
+    suffix = f' {unit}' if unit else ''
+    return f'{label}: {format(float(value), fmt)}{suffix}'
+
+
+
+def qt_dashboard_status():
+    targets = get_live_heating_targets()
+    ramp = get_live_ramp_settings()
+    manual = get_manual_current_state()
+    phase = current_phase()
+    rel_ck1 = relative_ck1_thickness()
+    rel_sample = relative_sample_thickness()
+    manual_applied = manual.get('last_applied_current_a')
+    lines = [
+        f'Phase: {phase}',
+        f'Feedback mode: {evaporation_control_mode_label()}',
+        f'Molecule profile: {MOLECULE_CONDITION_PROFILE}',
+        f'Active control: {get_active_feedback_controller()}',
+        f'Active T target: {active_temperature_target_c():.2f} ºC',
+        f'Shutter: {_qt_shutter_status()}',
+        f'Current mode: {"MANUAL" if manual.get("enabled") else "AUTO"}',
+        _qt_value_line('Manual I', manual_applied, '.3f', 'A'),
+        f'Ramp: {ramp_mode_label(ramp["mode"])}',
+        f'Steps until: {ramp["steps_until_temp_c"]:.1f} ºC',
+        f'Step period: {ramp["steps_step_period_s"]:.1f} s',
+        f'Slopes E/M/L: {ramp["slope_early_c_per_min"]:.1f}/'
+        f'{ramp["slope_mid_c_per_min"]:.1f}/{ramp["slope_late_c_per_min"]:.1f}',
+        f'Target T / guide: {targets["trigger_temp_c"]:.1f} ºC',
+        f'Rate-mode max T: {RATE_CONTROL_MAX_TEMP_C:.1f} ºC',
+        f'Target rate: {targets["rate_target_a_per_s"]:.3f} Å/s',
+        f'Control rate band: {targets["rate_low_a_per_s"]:.3f}-{targets["rate_high_a_per_s"]:.3f} Å/s',
+        f'Cascade inner ready: {"YES" if rate_pid_state.get("cascade_inner_ready") else "NO"} '
+        f'({float(rate_pid_state.get("cascade_inner_ready_elapsed_s") or 0.0):.0f}/'
+        f'{effective_cascade_inner_ready_stable_s():.0f} s)',
+        f'Thermal response pending: {"YES" if rate_pid_state.get("cascade_thermal_response_pending") else "NO"}',
+        f'Outer hold: {rate_pid_state.get("cascade_outer_freeze_reason") or "none"}',
+        _qt_value_line('CK-1 relative', rel_ck1, '.2f', 'Å'),
+        _qt_value_line('Sample relative', rel_sample, '.2f', 'Å'),
+        _qt_value_line('CK-1 T', latest_ck1_temperature(), '.1f', 'ºC'),
+        _qt_value_line('CK-1 rate raw', latest_value('CK-1 evaporator QMB', 'rate_data'), '.3f', 'Å/s'),
+        _qt_value_line('Rate estimate', filtered_ck1_rate(), '.3f', 'Å/s'),
+        _qt_value_line('Current', latest_value('Keysight power supply', 'current_data'), '.3f', 'A'),
+        _qt_value_line('Voltage', latest_value('Keysight power supply', 'voltage_data'), '.3f', 'V'),
+    ]
+    return {
+        'phase': phase,
+        'phase_label': phase_title_for_display(phase),
+        'status_lines': lines,
+        'last_action': _qt_last_action_text(),
+        'feedback_mode': get_evaporation_control_mode(),
+        'feedback_mode_label': evaporation_control_mode_label(),
+        'active_feedback_controller': get_active_feedback_controller(),
+        'temperature_view': temperature_view_state.get('mode', 'oven'),
+        'targets': targets,
+        'ramp': ramp,
+        'manual': manual,
+    }
+
+
+def build_qt_dashboard_spec():
+    from npg_chamber.common.qt_phase_dashboard import PhaseDashboardSpec
+
+    return PhaseDashboardSpec(
+        window_title='Phase 01 · Heat up + Calibration',
+        phase_name='Heat up + Calibration',
+        snapshot_provider=copy_plot_snapshot,
+        status_provider=qt_dashboard_status,
+        stop_event=stop_event,
+        apply_targets=qt_apply_heating_targets,
+        reset_targets=qt_reset_heating_targets,
+        apply_ramp=qt_apply_ramp_settings,
+        reset_ramp=qt_reset_ramp_settings,
+        set_manual_current=qt_set_manual_current,
+        resume_automatic_current=qt_resume_automatic_current,
+        open_shutter=qt_open_shutter,
+        close_shutter=qt_close_shutter,
+        abort=request_gui_abort,
+        finish=request_gui_finish,
+        set_temperature_view=set_temperature_view,
+        set_feedback_mode=qt_set_feedback_mode,
+        refresh_interval_ms=250,
+        max_plot_points=MAX_PLOT_POINTS_PER_SERIES,
+    )
+
 # _____________________MAIN_______________________________________________________
 def main():
+    try:
+        if keysight_state['automation_enabled']:
+            configure_keysight_for_automation()
+    except Exception as exc:
+        print_banner(
+            'KEYSIGHT STARTUP FAILED / PHASE NOT STARTED\n'
+            f'{exc}\n'
+            'The supply was returned to 0 A with output OFF.'
+        )
+        emergency_keysight_shutdown(f'Keysight startup failure before threads: {exc}')
+        return
     threads = [
         threading.Thread(target=monitor_qmb, daemon=True),
         threading.Thread(target=read_pressure, daemon=True),
@@ -3815,22 +4939,29 @@ def main():
     for thread in threads:
         thread.start()
 
-    setup_live_target_controls()
-    setup_temperature_view_selector()
-    show_live_plot_window()
-
-    last_plot_refresh_at = 0.0
-
     try:
-        while not stop_event.is_set():
-            now = time.time()
+        if USE_QT_PHASE13_DASHBOARD:
+            from npg_chamber.common.qt_phase_dashboard import run_phase_dashboard
 
-            if now - last_plot_refresh_at >= GUI_REFRESH_INTERVAL_S:
-                snapshot = copy_plot_snapshot()
-                update_live_plot(snapshot)
-                last_plot_refresh_at = now
+            print('Starting fast PySide6 + PyQtGraph dashboard ...')
+            run_phase_dashboard(build_qt_dashboard_spec())
+        else:
+            print(
+                'Fast Qt dashboard unavailable or disabled; using the previous '
+                'Matplotlib GUI fallback.'
+            )
+            setup_live_target_controls()
+            setup_temperature_view_selector()
+            show_live_plot_window()
+            last_plot_refresh_at = 0.0
 
-            safe_live_plot_refresh(0.005)
+            while not stop_event.is_set():
+                now = time.time()
+                if now - last_plot_refresh_at >= GUI_REFRESH_INTERVAL_S:
+                    snapshot = copy_plot_snapshot()
+                    update_live_plot(snapshot)
+                    last_plot_refresh_at = now
+                safe_live_plot_refresh(0.005)
     except KeyboardInterrupt:
         print('(▀̿Ĺ̯▀̿ ̿) Stop all the threads!!!')
         emergency_keysight_shutdown('KeyboardInterrupt / manual stop')
@@ -3857,12 +4988,19 @@ def main():
     if final_ratio is not None:
         print(f"Final thickness ratio (CK-1 relative / Sample relative): {final_ratio:.2f}")
 
-    fig2, ((fax_thickness_ck1, fax_rate_ck1, fax_pressure_xgs600),
-           (fax_thickness_sample, fax_rate_sample, fax_temperature_oven),
-           (fax_current_keysight, fax_voltage_keysight, fax_temperature_ck1)) = plt.subplots(3, 3, figsize=(18, 15))
+    if USE_QT_PHASE13_DASHBOARD:
+        fig2 = Figure(figsize=(18, 15))
+        FigureCanvas(fig2)
+        ((fax_thickness_ck1, fax_rate_ck1, fax_pressure_xgs600),
+         (fax_thickness_sample, fax_rate_sample, fax_temperature_oven),
+         (fax_current_keysight, fax_voltage_keysight, fax_temperature_ck1)) = fig2.subplots(3, 3)
+    else:
+        fig2, ((fax_thickness_ck1, fax_rate_ck1, fax_pressure_xgs600),
+               (fax_thickness_sample, fax_rate_sample, fax_temperature_oven),
+               (fax_current_keysight, fax_voltage_keysight, fax_temperature_ck1)) = plt.subplots(3, 3, figsize=(18, 15))
 
     fig2.suptitle('Heat up + Calibration parameters', fontsize=16, fontweight='bold')
-    plt.subplots_adjust(left=0.05, right=0.99, top=0.9, bottom=0.1, hspace=0.45, wspace=0.25)
+    fig2.subplots_adjust(left=0.05, right=0.99, top=0.9, bottom=0.1, hspace=0.45, wspace=0.25)
 
     fax_thickness_ck1.plot(data['CK-1 evaporator QMB']['thickness_times'], data['CK-1 evaporator QMB']['thickness_data'], '-o', color='green', markersize=4)
     fax_thickness_ck1.set_title('CK-1 Evaporator QMB Thickness'); fax_thickness_ck1.set_xlabel(''); fax_thickness_ck1.set_ylabel('Thickness (Å)'); fax_thickness_ck1.tick_params(axis='x', rotation=30)
@@ -3890,7 +5028,9 @@ def main():
     fig2.savefig(plot_file_path)
     print(f"All data has been saved in the folder '{final_folder_path}'")
     try:
-        if process_state.get('gui_auto_close', False):
+        if USE_QT_PHASE13_DASHBOARD:
+            pass
+        elif process_state.get('gui_auto_close', False):
             plt.close('all')
         else:
             print('Waiting for you to close the final plot windows...')
