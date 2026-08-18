@@ -8,6 +8,8 @@
 - Excluded machine-specific/runtime artifacts (`.venv`, `*.egg-info`, caches, macOS metadata, and experimental run outputs) from the release commit.
 - Updated `CITATION.cff` to release `0.9.36` and corrected the source-distribution manifest pattern for `READ ME.md`.
 - Restored the complete historical changelog from the v16 archive so the repository documents the full project evolution from v0.8.5 through v17.
+- Reworked the four phase explanation PDFs as concise, color-coded one-page operator guides and streamlined repetitive or outdated SOP text.
+- Added visible project credits for Roger Simon de Febrer and Piotr Krzysztof Ciochon, plus CC BY 4.0 licensing for the original project documentation.
 - No chamber-control behavior was changed relative to the supplied v17(9) release source.
 
 ## Release history at a glance

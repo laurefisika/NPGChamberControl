@@ -4,17 +4,33 @@
 **Package name:** `npg-chamber`  
 **Current release:** `0.9.36`
 
+## Project credits
+
+- **Project development and documentation:** Laura Rodríguez Jordán.
+- **Original base code:** Roger Simon de Febrer.
+- **Scientific supervision and training:** [Piotr Krzysztof Ciochon](https://icn2.cat/en/staff-directory?member=2430).
+
+The documentation is available under
+[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
+See `LICENSE.md` for the exact scope and the separate software terms.
+
 ## Current operator interface
 
-The unified launcher starts the four chamber phases and keeps routine run setup in one place. **Change automatization parameters** now shows the settings normally needed before a run first; detailed controller gains, filtering, signal-quality and qualification parameters remain available under the collapsed **Expert mode** section for each phase. Fixed equipment hard stops, COM ports and baud rates are not exposed as routine run controls.
+The launcher keeps routine setup in one place and runs every phase as a separate
+process. The detailed controller and signal-quality settings remain available
+under **Expert mode**; fixed hardware limits, COM ports and baud rates are not
+routine controls.
 
-For Phases 01 and 03, the main run-level safety values remain independently configurable: **Rate-control temperature ceiling** (250 °C default), **Watchdog maximum temperature** (255 °C default) and **Maximum automatic current cap** (0.660 A default). The fixed software hard-current stop remains 0.680 A and is not editable from the launcher.
+| Area | Current behavior |
+|---|---|
+| Phases 01 and 03 | Responsive PySide6 + PyQtGraph dashboards with editable targets and controller mode. |
+| Phase 02 | Task-focused pywebview dashboard with direct COSCON control and an explicit continuation option without initial Degas. |
+| Phase 04 | Final annealing sequence, parallel Keysight ramp-down and automatic finish after 10 min at a 0 °C PID setpoint. |
+| Pyrometer | Monitoring and data recording only; it never controls the PID, Keysight, shutter or safety decisions. |
 
-Phase 01 calibration uses the exact interpolated Sample-QMB target crossing and synchronized CK-1/Sample QMB linearity. It does **not** compare the new calibration ratio against a fixed historical ratio, because the expected ratio can legitimately change with source condition and time since refill.
-
-Phases 01 and 03 use the native PySide6 + PyQtGraph dashboard. Phase 02 uses the task-focused pywebview interface and supports **Start without initial Degas** for legitimate continuation runs. Phase 04 sends its final cooldown setpoint to **0 °C**, holds it for **10 minutes**, saves the final data and plots, and then closes automatically instead of logging many hours of passive cooldown.
-
-The shared pyrometer profile remains monitoring-only: its raw and estimated sample temperatures are displayed and saved but do not make PID, Keysight, shutter, transition or safety decisions.
+For Phases 01 and 03, the main defaults are a 250 °C rate-control ceiling, a
+255 °C independent watchdog and a 0.660 A automatic current cap. The fixed
+software hard-current stop is 0.680 A.
 
 ## Local Python runtime
 
@@ -67,35 +83,24 @@ The package also provides direct command-line launch options, diagnostics, and d
 
 ## 3. What has not been changed
 
-The four authoritative runtime scripts are preserved inside:
+The four authoritative runtime scripts are located in:
 
 ```text
 npg_chamber/legacy_scripts/
 ```
 
+The launcher never rewrites these files. It starts the selected script as a
+separate process and passes only validated run-level inputs, such as the run
+name, temporary automation parameters and the Phase 01 thickness ratio.
 
-```text
-```
+Packaging changes do not silently alter experimental targets, current limits,
+PID constants, timings, pressure thresholds, QMB logic, shutter logic or safe
+end states. Any intentional behavioral change is recorded explicitly in
+`CHANGELOG.md` and protected by regression tests.
 
-The launcher never imports or executes the backup folder automatically. In this package, each backup is a byte-for-byte copy of its current authoritative runtime script, so a maintainer can restore a working file if the active copy is accidentally damaged.
-
-Except for changes explicitly recorded in `CHANGELOG.md`, the packaging layer does **not** change:
-
-- experimental variables;
-- current limits;
-- setpoints;
-- PID constants;
-- timings;
-- pressure thresholds;
-- QMB logic;
-- Keysight logic;
-- Arduino reading logic;
-- shutter logic;
-- abort logic;
-- ramp-down logic;
-- experimental file contents or naming inside each run folder.
-
-The intentional packaging-level changes are limited to user convenience: every run saves under `Data Samples/<phase data folder>/`, the graphical launcher passes startup run names, the Phase-1 thickness ratio can be handed to DP-DBBA automatically, and validated run-only automation recipe values can be passed to the selected child process. The launcher never rewrites the script files; hardware communication and control logic remain inside the four phase scripts.
+Generated data are routed to the matching folder under `Data Samples/`. Git
+history and the complete changelog preserve the evolution of the project; the
+clean v17 release does not include a duplicate runtime backup folder.
 
 ---
 
@@ -108,13 +113,13 @@ The intentional packaging-level changes are limited to user convenience: every r
 | 3. DP-DBBA Evaporation | `dpdbba` | `03_dp_dbba_evaporation_legacy.py` |
 | 4. NPG Annealings | `anneal` | `04_npg_annealings_legacy.py` |
 
-The exact hashes and file sizes of both the active runtime scripts and the preserved backup copies are recorded in:
+The exact hashes and file sizes of the four active runtime scripts are recorded in:
 
 ```text
 SOURCE_CODE_MANIFEST.json
 ```
 
-Use that file to verify which exact versions were packaged and whether either copy has been modified.
+Use that file to verify which exact versions were packaged and whether a runtime script has been modified.
 
 ---
 
@@ -125,7 +130,8 @@ npg_chamber_project/
 ├─ READ ME.md                  # this SOP and full user guide
 ├─ START_NPG_CHAMBER.bat       # double-click Windows launcher
 ├─ CHANGELOG.md                # release history and important changes
-├─ LICENSE.md                  # project license placeholder
+├─ LICENSE.md                  # documentation and software licensing scope
+├─ LICENSES/                   # complete third-party licence texts
 ├─ MANIFEST.in                 # packaging include rules
 ├─ SOURCE_CODE_MANIFEST.json   # SHA256 hashes of packaged workflow scripts
 ├─ pyproject.toml              # Python packaging configuration
@@ -141,6 +147,7 @@ npg_chamber_project/
 │  ├─ cli.py                   # command-line entry point: npg-chamber
 │  ├─ gui_launcher.py          # graphical launcher with phase buttons
 │  ├─ legacy_scripts/          # final packaged scripts executed by the launcher
+│  ├─ script_explanations/     # concise one-page PDF guide for each phase
 │  ├─ workflows/               # small wrappers that run each packaged script
 │  ├─ devices/                 # reusable device helper modules
 │  ├─ common/                  # shared helper utilities
@@ -162,13 +169,12 @@ READ ME.md
 SOURCE_CODE_MANIFEST.json
 ```
 
-Strongly recommended:
+Required documentation:
 
 ```text
 CHANGELOG.md
+LICENSE.md
 ```
-
-The backup is not needed to run the chamber, but it should be kept with the laboratory project for recovery and source comparison.
 
 Optional but useful:
 
@@ -183,7 +189,9 @@ The optional folders are kept because they are useful for troubleshooting, valid
 
 Generated files such as `__pycache__/`, `.pytest_cache/`, `build/`, `dist/`, and `*.egg-info/` are not part of the clean release ZIP. They may appear locally after running tests or building a wheel, and they can be deleted safely.
 
-The four experimental scripts remain independent because each phase runs as its own process and owns different hardware and safety behavior. Cleanup removes only proven dead helper code, unused imports from active runtime files, and generated artifacts. The intentionally preserved script backup is an explicit exception; similar-looking phase logic is not merged when doing so could change experimental behavior.
+The four phase scripts remain independent because each process owns different
+hardware and safety behavior. Similar-looking logic is not merged when doing so
+could change experimental behavior.
 
 ---
 
@@ -442,211 +450,89 @@ The launcher also sets an environment variable called `NPG_CHAMBER_PHASE_DATA_DI
 
 ## 11. Phase 1 — Heat up + Calibration
 
-Direct command:
-
 ```bat
 npg-chamber --run heat
 ```
 
-Purpose:
+Heats the CK-1 evaporator and calculates the CK-1/Sample thickness ratio used
+by Phase 03.
 
-- heats the CK-1 evaporator;
-- monitors QMBs, pressure, oven PID, Keysight, Arduino CK-1 temperature and the IMPAC IPE 140 pyrometer;
-- monitors the existing oven PID value but does **not** write the 200 °C Phase 03 startup setpoint;
-- controls the Keysight current according to the script logic;
-- guides shutter opening/closing;
-- performs the calibration step;
-- calculates the thickness ratio:
+| Item | Operator-relevant behavior |
+|---|---|
+| Shutter readiness | CK-1 temperature and average CK-1 rate must both reach their active targets. |
+| Calibration | Starts after the shutter is physically opened and confirmed; finishes at the Sample-QMB target. |
+| **Finish phase** | Normal controlled ramp-down to 0 A, then Keysight OUTPUT OFF. |
+| **Abort / safe stop** | Immediate `CURR 0.000` and `OUTP OFF`; closes Phase 01 only. |
+| Data | `Data Samples/Heat up + Calibration Data/` |
 
-```text
-CK-1 relative thickness / Sample relative thickness
-```
-
-This ratio is required by the DP-DBBA evaporation phase.
-
-Data parent folder:
-
-```text
-Data Samples/Heat up + Calibration Data/
-```
-
-Typical run folder inside that parent:
-
-```text
-Heat up + Calibration data <run_name>/
-```
-
-Typical outputs:
-
-- device data text files;
-- graph snapshots;
-- phase summaries;
-- final thickness ratio information;
-- raw pyrometer and calibrated sample-temperature data;
-- the run-specific pyrometer profile and three-temperature comparison plots.
-
-Operator notes:
-
-- enter the run name in the launcher GUI before starting;
-- follow the script prompts and check that the shutter and hardware state match the software state;
-- **Finish phase** is the normal manual completion path: it enters the controlled Phase 01 `RAMP_DOWN`, reaches 0 A, switches the Keysight output OFF, saves the phase and closes only the Phase 01 process;
-- **Abort / safe stop** is intentionally immediate: it commands Keysight `CURR 0.000` and `OUTP OFF` before shutdown file I/O, then closes only Phase 01. The unified launcher remains open;
-- record the ratio for phase 3 when calibration completed normally.
+After a normal calibration, confirm that the saved thickness ratio is valid
+before using it in Phase 03.
 
 ---
 
 ## 12. Phase 2 — Sputtering-Annealing
 
-Direct command:
-
 ```bat
 npg-chamber --run sputter
 ```
 
-Purpose:
+Runs the COSCON sputtering and oven-annealing cycles. COSCON sequencing is
+automatic; the argon leak valve remains a physical operator action.
 
-- opens a task-focused Phase 02 operator dashboard with secondary details available on demand;
-- controls COSCON directly through UDP instead of embedding the COSCON webpage;
-- performs the complete cycle-1 Degas and waits for natural `Standby`;
-- validates and applies the 10 mA / 2250 V sputtering target;
-- internally verifies COSCON mode, hardware interlock, energy, emission and chamber pressure before the sputtering timer begins;
-- continuously supervises COSCON and pressure during sputtering;
-- returns COSCON automatically to `Standby` before the leak valve is closed;
-- keeps only the manual argon leak-valve open/close confirmations;
-- controls and verifies oven PID setpoints for the annealing stages;
-- displays current-step time, stage/run elapsed time and known timed work remaining;
-- shows one clear Waiting / Ready / Check system result; detailed COSCON mode and interlock values are available only under Auxiliary diagnostics;
-- logs chamber, oven, Keysight, COSCON and countdown telemetry to CSV.
+| Item | Operator-relevant behavior |
+|---|---|
+| Normal sequence | Degas or verified continuation → open leak valve → pressure conditioning → Operate → sputter → Standby → close valve → anneal. |
+| Sputtering target | 2250 V and 10 mA, verified from device output and interlock state. |
+| Continuation | **Start without initial Degas** is only for an already-degassed preparation. |
+| **Abort / safe stop** | Requests a verified COSCON safe state and oven PID 0 °C. |
+| Data | `Data Samples/Sputtering-Annealing Data/` |
 
-Data parent folder:
-
-```text
-Data Samples/Sputtering-Annealing Data/
-```
-
-Typical run folder inside that parent:
-
-```text
-<run_name> Sputtering-Annealing/
-```
-
-Typical output file:
-
-```text
-sputter_anneal_log.csv
-```
-
-Operator notes:
-
-- enter the run name in the launcher GUI before starting;
-- keep the COSCON webpage and SpecsLab/Prodigy closed while Phase 02 is active;
-- the argon leak valve remains manual and the dashboard shows its buttons only when those actions are required;
-- supervise the run and keep access to the local COSCON controls;
-- on abort or a detected fault, the script requests a verified COSCON safe state and tries to reset the PID setpoint to 0 °C.
+Keep the COSCON webpage and SpecsLab/Prodigy closed while direct Phase 02
+control is active. Open or close the leak valve only when the GUI requests it.
 
 ---
 
 ## 13. Phase 3 — DP-DBBA Evaporation
 
-Direct command:
-
 ```bat
 npg-chamber --run dpdbba
 ```
 
-Purpose:
+Uses the Phase 01 ratio to calculate the DP-DBBA target and prepares the live
+electrical handoff to Phase 04.
 
-- uses the run name entered in the launcher GUI;
-- uses the thickness ratio automatically captured from Phase 01 when available;
-- calculates the DP-DBBA CK-1 evaporation target;
-- sets the external oven PID target to 200 °C at startup;
-- monitors QMBs, pressure, oven PID, Keysight, CK-1 Arduino temperature and the IMPAC IPE 140 pyrometer;
-- guides shutter open/close;
-- resets the QMB evaporation window at shutter opening;
-- ends according to CK-1 relative thickness target;
-- leaves the Keysight in the intended handoff state for NPG Annealings according to the script logic.
+| Item | Operator-relevant behavior |
+|---|---|
+| Before launch | Confirm or replace the ratio shown by the launcher. |
+| Shutter readiness | External oven stable near 200 °C, plus CK-1 temperature and average rate at target. |
+| **Finish phase** | At `WAIT_SHUTTER_CLOSE`, returns to 0.640 A and keeps OUTPUT ON for Phase 04. |
+| **Abort / safe stop** | Immediate `CURR 0.000` and `OUTP OFF`; requests PID 0 °C afterwards. |
+| Data | `Data Samples/DP-DBBA Evaporation Data/` |
 
-Data parent folder:
-
-```text
-Data Samples/DP-DBBA Evaporation Data/
-```
-
-Typical run folder inside that parent:
-
-```text
-DP-DBBA Evaporation data <run_name>/
-```
-
-Typical outputs:
-
-- run parameters file;
-- device data text files;
-- graph snapshots;
-- phase summaries;
-- raw pyrometer and calibrated sample-temperature data;
-- the run-specific pyrometer profile and three-temperature comparison plots.
-
-Operator notes:
-
-- enter the run name in the launcher GUI; the calibration ratio is automatic after Phase 01, or requested by pop-up if the launcher does not know it;
-- verify the script target calculation before proceeding;
-- when the DP-DBBA target is reached, physically close the shutter and use **Close shutter** or **Finish phase** to confirm the normal handoff. **Finish phase** is blocked before the `WAIT_SHUTTER_CLOSE` stage;
-- **Abort / safe stop** is intentionally immediate: it commands Keysight `CURR 0.000` and `OUTP OFF` first, then requests Oven PID `0 °C` on a best-effort basis and closes only Phase 03. A slow/failing PID transaction can therefore never delay removal of evaporator power;
-- **Finish phase** remains the normal handoff path: once `WAIT_SHUTTER_CLOSE` is reached and the shutter is physically closed, the script returns the Keysight to **0.640 A**, keeps `OUTPUT ON`, saves the run and closes only Phase 03 so Phase 04 can start from the intended thermal/electrical state;
-- after normal completion, proceed to NPG Annealings only after confirming the hardware state.
+Before starting Phase 04, verify that the physical shutter is closed and the
+Keysight is in the expected 0.640 A / OUTPUT ON handoff state.
 
 ---
 
 ## 14. Phase 4 — NPG Annealings
 
-Direct command:
-
 ```bat
 npg-chamber --run anneal
 ```
 
-Purpose:
+Runs the final oven recipe while the Phase 03 Keysight current ramps down in
+parallel.
 
-- runs the final NPG annealing sequence;
-- controls the oven PID setpoint through the defined stages;
-- after the second annealing hold, sends the cooldown target (0 °C by default), holds it for 10 minutes and finishes with the PID SV still at that value;
-- monitors oven PID temperature;
-- monitors the IMPAC IPE 140 raw temperature and calculated sample temperature;
-- provides the OVEN PID / PYROMETER / SAMPLE EST. live selector;
-- monitors CK-1 Arduino temperature;
-- monitors Keysight current and voltage;
-- performs the Keysight ramp-down according to the script;
-- asks/indicates when the evaporator current must be switched off;
-- saves telemetry, plots and database/CSV outputs.
+| Item | Operator-relevant behavior |
+|---|---|
+| Default recipe | 200 °C for 5 min → 350 °C for 15 min → 600 °C for 40 min. |
+| Cooldown | PID setpoint 0 °C for 10 min, then save and finish automatically. |
+| Keysight | Ramps to 0 A independently, then switches OUTPUT OFF. |
+| **Abort / safe stop** | Requests PID 0 °C and forces Keysight OUTPUT OFF. |
+| Data | `Data Samples/NPG Annealing Data/` |
 
-Data parent folder:
-
-```text
-Data Samples/NPG Annealing Data/
-```
-
-Typical run folder inside that parent:
-
-```text
-NPG Annealings <run_name>/
-```
-
-Typical outputs:
-
-- SQLite PID temperature database;
-- PID temperature CSV;
-- telemetry CSV containing oven, raw pyrometer and estimated sample temperatures;
-- the run-specific pyrometer profile;
-- saved temperature-comparison and electrical plots.
-
-Operator notes:
-
-- enter the run name in the launcher GUI before starting;
-- do not leave the system unattended;
-- verify current and voltage during ramp-down;
-- confirm the evaporator/power state at the end;
-- normal completion and Abort / Safe Stop both leave the oven PID SV at the cooldown target (0 °C by default); there is no final 30 °C command.
+Software completion does not mean that the chamber is physically cool. Confirm
+the real temperature and electrical state before venting or handling the sample.
 
 ---
 
@@ -860,20 +746,17 @@ Stop and inspect the hardware. Do not continue automatically.
 ## 22. Recommended operating sequence
 
 1. Double-click `START_NPG_CHAMBER.bat` in the project folder.
+2. Review the run names and routine automation parameters.
+3. Start Phase 01 and follow only the actions shown by its GUI.
+4. After each phase, confirm the real hardware state before continuing.
+5. At the end of Phase 04, check the saved data, temperatures, PID and Keysight.
 
-Alternative manual method:
+Manual launcher alternative:
 
 ```bat
 .venv\Scripts\activate
 npg-chamber
 ```
-
-4. Click **READ ME** if you need the SOP.
-5. Start phase 1.
-6. Let the phase finish and confirm the hardware state.
-7. If appropriate, accept the prompt to continue to phase 2.
-8. Repeat for phases 3 and 4.
-9. At the end, check saved data and physical hardware state.
 
 ---
 
@@ -884,20 +767,23 @@ Only non-duplicated support files are kept:
 | File | Purpose |
 |---|---|
 | `CHANGELOG.md` | release history |
-| `LICENSE.md` | license/project ownership note |
+| `LICENSE.md` | licensing scope, attribution and software terms |
+| `LICENSES/CC-BY-4.0.txt` | complete Creative Commons legal text |
 | `SOURCE_CODE_MANIFEST.json` | exact script hashes |
 | `MANIFEST.in` | packaging include rules |
 | `pyproject.toml` | Python packaging configuration |
 
 All user instructions are consolidated in this `READ ME.md` file.
 
-## Phase explanation PDF buttons
+## 24. Phase explanation PDF buttons
 
-The graphical launcher includes one explanation button under each Start button:
+Each launcher **Explanation** button opens a concise one-page operator guide:
 
-- `Explanation 01 Heat up + Calibration` opens the Heat up + Calibration PDF explanation.
-- `Explanation 02 Sputtering-Annealing` opens the Sputtering-Annealing PDF explanation.
-- `Explanation 03 DP-DBBA Evaporation` opens the DP-DBBA Evaporation PDF explanation.
-- `Explanation 04 NPG Annealings` opens the NPG Annealings PDF explanation.
+| Phase | Guide |
+|---|---|
+| 01 | `npg_chamber/script_explanations/01_heat_up_calibration_explanation.pdf` |
+| 02 | `npg_chamber/script_explanations/02_sputtering_annealing_explanation.pdf` |
+| 03 | `npg_chamber/script_explanations/03_dp_dbba_evaporation_explanation.pdf` |
+| 04 | `npg_chamber/script_explanations/04_npg_annealings_explanation.pdf` |
 
 These PDF buttons are documentation-only shortcuts. They do not start, stop, or modify any experimental script.
