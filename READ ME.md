@@ -8,7 +8,7 @@
 
 - **Project development and documentation:** Laura Rodríguez Jordán.
 - **Original base code:** Roger Simon de Febrer.
-- **Scientific supervision and training:** [Piotr Krzysztof Ciochon](https://icn2.cat/en/staff-directory?member=2430).
+- **Scientific supervision and training:** Piotr Krzysztof Ciochon.
 
 The documentation is available under
 [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
