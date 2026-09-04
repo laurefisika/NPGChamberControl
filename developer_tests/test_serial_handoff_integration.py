@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 def test_launcher_blocks_next_phase_until_verified_serial_handoff():
-    runner = Path("npg_chamber/workflows/legacy_runner.py").read_text(encoding="utf-8")
+    runner = Path("npg_chamber/workflows/runner.py").read_text(encoding="utf-8")
     gui = Path("npg_chamber/gui_launcher.py").read_text(encoding="utf-8")
 
     assert 'verify_all_chamber_ports_released(context=f"before phase {key}")' in runner
@@ -13,10 +13,10 @@ def test_launcher_blocks_next_phase_until_verified_serial_handoff():
 
 
 def test_phase_two_and_four_reset_buffers_before_closing_serial_ports():
-    phase2 = Path("npg_chamber/legacy_scripts/02_sputtering_annealing_legacy.py").read_text(
+    phase2 = Path("npg_chamber/phase_scripts/02_sputtering_annealing.py").read_text(
         encoding="utf-8"
     )
-    phase4 = Path("npg_chamber/legacy_scripts/04_npg_annealings_legacy.py").read_text(
+    phase4 = Path("npg_chamber/phase_scripts/04_npg_annealings.py").read_text(
         encoding="utf-8"
     )
 

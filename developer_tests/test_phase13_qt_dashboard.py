@@ -3,18 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 import threading
 
+import pytest
+
 from npg_chamber.common.qt_phase_dashboard import (
     LatestFrameMailbox,
     PhaseDashboardSpec,
     TelemetryFrame,
     capture_telemetry_frame,
+    relative_thickness_series,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PHASES = (
-    ROOT / "npg_chamber" / "legacy_scripts" / "01_heat_up_calibration_legacy.py",
-    ROOT / "npg_chamber" / "legacy_scripts" / "03_dp_dbba_evaporation_legacy.py",
+    ROOT / "npg_chamber" / "phase_scripts" / "01_heat_up_calibration.py",
+    ROOT / "npg_chamber" / "phase_scripts" / "03_dp_dbba_evaporation.py",
 )
 QT_DASHBOARD = ROOT / "npg_chamber" / "common" / "qt_phase_dashboard.py"
 
@@ -124,7 +127,7 @@ def test_phase_01_and_03_support_live_bumpless_feedback_mode_switching() -> None
 def test_project_declares_and_launcher_verifies_qt_dependencies() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     launcher = (ROOT / "START_NPG_CHAMBER.bat").read_text(encoding="utf-8")
-    assert 'version = "0.9.36"' in pyproject
+    assert 'version = "0.9.41"' in pyproject
     assert '"PySide6-Essentials>=6.7,<7"' in pyproject
     assert '"pyqtgraph>=0.13.7,<0.15"' in pyproject
     assert '"numpy>=1.26"' in pyproject
@@ -340,3 +343,47 @@ def test_qt_dashboard_button_helper_is_called_with_its_declared_signature() -> N
             if len(node.args) != 3:
                 bad_calls.append((node.lineno, len(node.args)))
     assert bad_calls == []
+
+
+def test_post_shutter_thickness_series_starts_at_zero_and_hides_preopen_history() -> None:
+    times = [100.0, 101.0, 102.0, 103.0]
+    values = [50.0, 50.4, 50.9, 51.5]
+    out_times, out_values = relative_thickness_series(
+        times, values, baseline=50.4, start_timestamp=101.5
+    )
+    assert out_times == [101.5, 102.0, 103.0]
+    assert out_values == pytest.approx([0.0, 0.5, 1.1])
+
+
+def test_phase13_qt_dashboard_has_open_and_close_shutter_markers_on_every_plot() -> None:
+    dashboard = QT_DASHBOARD.read_text(encoding="utf-8")
+    assert "self._shutter_reference_lines" in dashboard
+    assert "self._shutter_close_reference_lines" in dashboard
+    assert "for key, widget in self._plots.items()" in dashboard
+    assert "angle=90" in dashboard
+    assert 'status.get("shutter_open_timestamp")' in dashboard
+    assert 'status.get("shutter_close_timestamp")' in dashboard
+    assert "CK-1 QMB relative thickness" in dashboard
+    assert "Sample QMB relative thickness" in dashboard
+
+    for path in PHASES:
+        source = path.read_text(encoding="utf-8")
+        assert "'shutter_open_timestamp': None" in source
+        assert "'shutter_close_timestamp': None" in source
+        assert "process_state['shutter_open_timestamp'] = shutter_open_timestamp" in source
+        assert "process_state['shutter_close_timestamp'] = shutter_close_timestamp" in source
+        assert "'relative_thickness_active': process_state.get('shutter_open_timestamp') is not None" in source
+        assert "'baseline_ck1_thickness': process_state.get('baseline_ck1_thickness')" in source
+        assert "'baseline_sample_thickness': process_state.get('baseline_sample_thickness')" in source
+        assert "_add_shutter_region_to_snapshot(axes.flat)" in source
+        assert "set_yscale('log')" in source
+        assert "CK-1 absolute" in source
+        assert "Sample absolute" in source
+
+
+def test_phase13_pressure_axis_reserves_visible_log_scale_space() -> None:
+    dashboard = QT_DASHBOARD.read_text(encoding="utf-8")
+    assert 'if key == "pressure":' in dashboard
+    assert "value_axis.setWidth(104)" in dashboard
+    assert "tickTextWidth=72" in dashboard
+    assert "tickTextOffset=6" in dashboard

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from npg_chamber import __version__, __build__
-from npg_chamber.common.paths import phase_data_dir
+from npg_chamber.common.paths import phase_data_dir, phase_run_folder_prefix
 from npg_chamber.config.automation_modes import (
     PACKAGED_DEFAULT_MODE_NAME,
     delete_automation_mode,
@@ -52,9 +52,9 @@ from npg_chamber.config.run_parameters import (
     validate_phase_values,
     validate_pyrometer_values,
 )
-from npg_chamber.workflows.legacy_runner import (
-    LEGACY_WORKFLOWS,
-    launch_legacy_workflow_process,
+from npg_chamber.workflows.runner import (
+    WORKFLOWS,
+    launch_workflow_process,
     wait_for_phase_process,
 )
 
@@ -455,7 +455,7 @@ class NPGLauncherApp:
 
         readme_btn = tk.Button(
             footer,
-            text="READ ME",
+            text="README",
             bg="#86efac",
             fg="#111827",
             activebackground="#4ade80",
@@ -1487,13 +1487,13 @@ class NPGLauncherApp:
         dialog.wait_window()
 
     def _readme_candidates(self) -> list[Path]:
-        """Return likely READ ME paths for source/editable installations."""
+        """Return likely README paths for source/editable installations."""
 
         package_file = Path(__file__).resolve()
         return [
-            Path.cwd() / "READ ME.md",
-            package_file.parents[1] / "READ ME.md",
-            package_file.parents[2] / "READ ME.md" if len(package_file.parents) > 2 else package_file.parents[1] / "READ ME.md",
+            Path.cwd() / "README.md",
+            package_file.parents[1] / "README.md",
+            package_file.parents[2] / "README.md" if len(package_file.parents) > 2 else package_file.parents[1] / "README.md",
         ]
 
     def _find_readme_path(self) -> Path | None:
@@ -1516,8 +1516,8 @@ class NPGLauncherApp:
         readme_path = self._find_readme_path()
         if readme_path is None:
             self.messagebox.showerror(
-                "READ ME not found",
-                "Could not find 'READ ME.md'. Make sure you are running the launcher from the project folder."
+                "README not found",
+                "Could not find 'README.md'. Make sure you are running the launcher from the project folder."
             )
             return
 
@@ -1528,10 +1528,10 @@ class NPGLauncherApp:
                 subprocess.Popen(["open", str(readme_path)])
             else:
                 subprocess.Popen(["xdg-open", str(readme_path)])
-            self.status_var.set(f"Opened READ ME: {readme_path}")
+            self.status_var.set(f"Opened README: {readme_path}")
         except Exception as exc:
             self.messagebox.showerror(
-                "Could not open READ ME",
+                "Could not open README",
                 f"The file exists, but the operating system could not open it.\n\n{readme_path}\n\nError: {exc}",
             )
 
@@ -1736,12 +1736,18 @@ class NPGLauncherApp:
 
         heat_parent = phase_data_dir("heat")
         run_name = self.run_name_vars.get("heat").get().strip() if "heat" in self.run_name_vars else ""
-        safe_run = re.sub(r'[<>:"/\\|?*]+', "_", run_name).strip() or "unnamed_trial"
-        preferred_name = f"Heat up + Calibration data {safe_run}"
+        preferred_prefix = phase_run_folder_prefix("heat", run_name)
+        historical_safe_run = re.sub(r'[<>:"/\\|?*]+', "_", run_name).strip() or "unnamed_trial"
+        historical_preferred_name = f"Heat up + Calibration data {historical_safe_run}"
 
         candidate_dirs = [p for p in heat_parent.iterdir() if p.is_dir()]
-        preferred = [p for p in candidate_dirs if p.name == preferred_name]
-        others = [p for p in candidate_dirs if p.name != preferred_name]
+        preferred = [
+            p
+            for p in candidate_dirs
+            if p.name.startswith(f"{preferred_prefix} ") or p.name == historical_preferred_name
+        ]
+        preferred_set = set(preferred)
+        others = [p for p in candidate_dirs if p not in preferred_set]
         candidate_dirs = sorted(preferred, key=lambda p: p.stat().st_mtime, reverse=True) + sorted(
             others,
             key=lambda p: p.stat().st_mtime,
@@ -1783,7 +1789,7 @@ class NPGLauncherApp:
         if self.running_key is not None:
             self.messagebox.showinfo("Phase running", "A phase is already running.")
             return
-        if key not in LEGACY_WORKFLOWS:
+        if key not in WORKFLOWS:
             self.messagebox.showerror("Unknown phase", f"Unknown phase: {key}")
             return
 
@@ -1791,7 +1797,7 @@ class NPGLauncherApp:
         if initial_env is None:
             return
 
-        workflow = LEGACY_WORKFLOWS[key]
+        workflow = WORKFLOWS[key]
         self.running_key = key
         self._set_buttons_enabled(False)
         self.status_var.set(
@@ -1805,7 +1811,7 @@ class NPGLauncherApp:
         process: subprocess.Popen | None = None
         error_detail: str | None = None
         try:
-            process = launch_legacy_workflow_process(key, extra_env=extra_env)
+            process = launch_workflow_process(key, extra_env=extra_env)
             with self.process_lock:
                 self.current_process = process
             exit_code = wait_for_phase_process(process, key)

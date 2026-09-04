@@ -1,10 +1,9 @@
 include LICENSE.md
-include LICENSES/CC-BY-4.0.txt
 include CHANGELOG.md
-include READ?ME.md
+include README.md
 include SOURCE_CODE_MANIFEST.json
 include START_NPG_CHAMBER.bat
-recursive-include npg_chamber/legacy_scripts *.py
+recursive-include npg_chamber/phase_scripts *.py
 recursive-include npg_chamber/script_explanations *.pdf
 recursive-include diagnostic_tools *.py
 recursive-include developer_tests *.py

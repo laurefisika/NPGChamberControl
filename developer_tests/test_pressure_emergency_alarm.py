@@ -50,9 +50,9 @@ def test_invalid_readings_do_not_create_false_alarm():
 
 def test_phase_alarm_thresholds_match_their_operating_regimes():
     root = Path(__file__).resolve().parents[1]
-    phase01 = (root / "npg_chamber/legacy_scripts/01_heat_up_calibration_legacy.py").read_text(encoding="utf-8")
-    phase02 = (root / "npg_chamber/legacy_scripts/02_sputtering_annealing_legacy.py").read_text(encoding="utf-8")
-    phase03 = (root / "npg_chamber/legacy_scripts/03_dp_dbba_evaporation_legacy.py").read_text(encoding="utf-8")
+    phase01 = (root / "npg_chamber/phase_scripts/01_heat_up_calibration.py").read_text(encoding="utf-8")
+    phase02 = (root / "npg_chamber/phase_scripts/02_sputtering_annealing.py").read_text(encoding="utf-8")
+    phase03 = (root / "npg_chamber/phase_scripts/03_dp_dbba_evaporation.py").read_text(encoding="utf-8")
     assert "PRESSURE_DESKTOP_ALARM_MBAR = 5.0e-6" in phase01
     assert "PRESSURE_DESKTOP_ALARM_MBAR = 5.0e-6" in phase03
     assert "threshold_mbar=self.cfg.pressure_emergency_mbar" in phase02

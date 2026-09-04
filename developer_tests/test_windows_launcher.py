@@ -6,13 +6,14 @@ def test_windows_batch_launcher_exists_and_is_relative():
     assert bat.is_file()
     text = bat.read_text(encoding="utf-8")
     assert 'cd /d "%~dp0"' in text
-    assert '.venv\\Scripts\\python.exe' in text
+    assert '%LOCALAPPDATA%\\NPGChamber' in text
+    assert 'set "VENV_PY=%VENV_DIR%\\Scripts\\python.exe"' in text
     assert 'python -m npg_chamber' in text or '-m npg_chamber' in text
     assert 'C:\\Users' not in text
 
 
 def test_readme_mentions_windows_batch_launcher():
-    text = Path("READ ME.md").read_text(encoding="utf-8")
+    text = Path("README.md").read_text(encoding="utf-8")
     assert "START_NPG_CHAMBER.bat" in text
     assert "One-click start on Windows" in text
 
@@ -33,8 +34,10 @@ def test_windows_launcher_reuses_and_repairs_local_runtime() -> None:
     assert "'clr'" in text
     assert "--no-cache-dir" in text
     assert "--no-deps -e ." in text
-    assert "python -m venv .venv" in text
+    assert 'python -m venv "%VENV_DIR%"' in text
     assert "py -3" not in text
     assert "Installing NPG Chamber dependencies once" in text
     assert "Repairing the local project link" in text
     assert "Less than 700 MB" in text
+    assert 'set "VENV_DIR=%RUNTIME_DIR%\\.venv"' in text
+    assert 'Runtime folder: %VENV_DIR%' in text

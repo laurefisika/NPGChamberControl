@@ -215,6 +215,9 @@ def test_phase_01_and_03_new_safety_defaults_and_relationships() -> None:
         assert defaults["RATE_CONTROL_MAX_TEMP_C"] == 250.0
         assert defaults["TEMP_WATCHDOG_MAX_TEMP_C"] == 255.0
         assert defaults["KEYSIGHT_SOFT_WARNING_A"] == 0.660
+        assert defaults["PID_TEMP_BAND_C"] == 0.7
+        if phase == "heat":
+            assert defaults["CALIBRATION_TARGET_SAMPLE_A"] == 2.0
 
         invalid = dict(defaults)
         invalid["TEMP_WATCHDOG_MAX_TEMP_C"] = invalid["RATE_CONTROL_MAX_TEMP_C"]

@@ -16,11 +16,6 @@ from typing import Iterable, Sequence
 CONTROL_MODE_TEMPERATURE = "temperature"
 CONTROL_MODE_RATE = "rate"
 CONTROL_MODE_COMPOUND = "compound"
-CONTROL_MODES = (
-    CONTROL_MODE_TEMPERATURE,
-    CONTROL_MODE_RATE,
-    CONTROL_MODE_COMPOUND,
-)
 
 
 def robust_rate_average(values: Sequence[float] | Iterable[float], points: int) -> float | None:

@@ -31,6 +31,47 @@ Snapshot = Mapping[str, Mapping[str, list[Any]]]
 Status = Mapping[str, Any]
 
 
+def relative_thickness_series(
+    times: list[Any],
+    values: list[Any],
+    *,
+    baseline: float | None,
+    start_timestamp: float | None,
+) -> tuple[list[Any], list[float]]:
+    """Return the post-shutter thickness trace referenced to 0 Å.
+
+    The phase scripts keep the instrument/raw history untouched (Phase 01) or
+    may reset their own evaporation window (Phase 03).  The dashboard therefore
+    performs this small presentation transform from the explicit baseline and
+    shutter timestamp supplied by the phase.  A synthetic 0 Å point at the
+    confirmation instant makes the physical reference unambiguous on screen.
+    """
+
+    if baseline is None or start_timestamp is None:
+        return list(times), list(values)
+    try:
+        base = float(baseline)
+        start = float(start_timestamp)
+    except Exception:
+        return list(times), list(values)
+    if not (math.isfinite(base) and math.isfinite(start)):
+        return list(times), list(values)
+
+    out_times: list[Any] = [start]
+    out_values: list[float] = [0.0]
+    for stamp, raw in zip(list(times), list(values)):
+        try:
+            ts = stamp.timestamp() if hasattr(stamp, "timestamp") else float(stamp)
+            value = float(raw)
+        except Exception:
+            continue
+        if not (math.isfinite(ts) and math.isfinite(value)) or ts < start:
+            continue
+        out_times.append(stamp)
+        out_values.append(value - base)
+    return out_times, out_values
+
+
 def parse_locale_flexible_float(text: str, label: str = "Value") -> float:
     """Parse one operator-entered decimal without locale-dependent scaling.
 
@@ -456,6 +497,8 @@ def run_phase_dashboard(spec: PhaseDashboardSpec) -> int:
             self._curve_has_data: dict[str, bool] = {}
             self._plots: dict[str, Any] = {}
             self._reference_lines: dict[str, Any] = {}
+            self._shutter_reference_lines: dict[str, Any] = {}
+            self._shutter_close_reference_lines: dict[str, Any] = {}
             self._last_phase = ""
             self._last_status: Status = {}
             self._last_frame_sequence = 0
@@ -473,6 +516,12 @@ def run_phase_dashboard(spec: PhaseDashboardSpec) -> int:
             self._last_action_text = ""
             self._last_runtime_health_text = ""
             self._last_temperature_view = ""
+            self._shutter_open_timestamp: float | None = None
+            self._shutter_close_timestamp: float | None = None
+            self._relative_thickness_active = False
+            self._relative_thickness_baselines: dict[str, float | None] = {
+                "ck1": None, "sample": None
+            }
             self._autoscale_ranges: dict[str, tuple[float, float]] = {}
 
             self._build_ui()
@@ -640,6 +689,17 @@ def run_phase_dashboard(spec: PhaseDashboardSpec) -> int:
                 row, col = divmod(index, 3)
                 axis = TimeAxis(orientation="bottom")
                 value_axis = RawValueAxis(orientation="left")
+                if key == "pressure":
+                    # Reserve a stable lane for the logarithmic decade labels.
+                    # Without this explicit width, the third-column pressure
+                    # values can be clipped/covered when the control splitter is
+                    # resized on the chamber PC.
+                    value_axis.setWidth(104)
+                    value_axis.setStyle(
+                        autoExpandTextSpace=False,
+                        tickTextWidth=72,
+                        tickTextOffset=6,
+                    )
                 widget = pg.PlotWidget(axisItems={"bottom": axis, "left": value_axis})
                 widget.setBackground("#ffffff")
                 widget.setTitle(title, color="#0f172a", size="11pt")
@@ -686,6 +746,32 @@ def run_phase_dashboard(spec: PhaseDashboardSpec) -> int:
             self._plots["ck1_temperature"].addItem(
                 self._reference_lines["temp_target"], ignoreBounds=True
             )
+
+            # One persistent vertical marker per graph.  The phase supplies the
+            # exact operator-confirmation timestamp; keeping the marker in the
+            # shared dashboard guarantees identical behaviour in Phase 01/03.
+            for key, widget in self._plots.items():
+                shutter_line = pg.InfiniteLine(
+                    angle=90,
+                    movable=False,
+                    pen=pg.mkPen(
+                        "#0f766e", width=1.6, style=QtCore.Qt.PenStyle.DashLine
+                    ),
+                )
+                shutter_line.setVisible(False)
+                widget.addItem(shutter_line, ignoreBounds=True)
+                self._shutter_reference_lines[key] = shutter_line
+
+                shutter_close_line = pg.InfiniteLine(
+                    angle=90,
+                    movable=False,
+                    pen=pg.mkPen(
+                        "#c2410c", width=1.6, style=QtCore.Qt.PenStyle.DashLine
+                    ),
+                )
+                shutter_close_line.setVisible(False)
+                widget.addItem(shutter_close_line, ignoreBounds=True)
+                self._shutter_close_reference_lines[key] = shutter_close_line
 
             splitter.addWidget(plot_host)
             splitter.addWidget(self._build_control_scroll())
@@ -1381,10 +1467,22 @@ def run_phase_dashboard(spec: PhaseDashboardSpec) -> int:
             if not xs or not ys:
                 return
             plot = self._plots[key]
-            if len(xs) == 1:
-                plot.setXRange(xs[0] - 30.0, xs[0] + 30.0, padding=0.0)
+            x_low = min(xs)
+            x_high = max(xs)
+            marker = self._shutter_open_timestamp
+            if marker is not None and math.isfinite(marker):
+                # Preserve the operator reference even when a thickness trace
+                # has just restarted and only contains post-shutter points.
+                x_low = min(x_low, marker)
+                x_high = max(x_high, marker)
+            close_marker = self._shutter_close_timestamp
+            if close_marker is not None and math.isfinite(close_marker):
+                x_low = min(x_low, close_marker)
+                x_high = max(x_high, close_marker)
+            if math.isclose(x_low, x_high, abs_tol=1e-9):
+                plot.setXRange(x_low - 30.0, x_high + 30.0, padding=0.0)
             else:
-                plot.setXRange(min(xs), max(xs), padding=0.015)
+                plot.setXRange(x_low, x_high, padding=0.015)
 
             if key == "pressure":
                 # Use pyqtgraph's public auto-range path for the logarithmic
@@ -1489,11 +1587,35 @@ def run_phase_dashboard(spec: PhaseDashboardSpec) -> int:
             supply = snapshot.get("Keysight power supply", {})
             arduino = snapshot.get("Arduino CK-1 crucible temperature", {})
 
+            self._update_shutter_reference(status)
+
+            ck1_thickness_times = ck1.get("thickness_times", [])
+            ck1_thickness_values = ck1.get("thickness_data", [])
+            sample_thickness_times = sample.get("thickness_times", [])
+            sample_thickness_values = sample.get("thickness_data", [])
+            ck1_thickness_title = "CK-1 QMB thickness"
+            sample_thickness_title = "Sample QMB thickness"
+            if self._relative_thickness_active:
+                ck1_thickness_times, ck1_thickness_values = relative_thickness_series(
+                    ck1_thickness_times,
+                    ck1_thickness_values,
+                    baseline=self._relative_thickness_baselines.get("ck1"),
+                    start_timestamp=self._shutter_open_timestamp,
+                )
+                sample_thickness_times, sample_thickness_values = relative_thickness_series(
+                    sample_thickness_times,
+                    sample_thickness_values,
+                    baseline=self._relative_thickness_baselines.get("sample"),
+                    start_timestamp=self._shutter_open_timestamp,
+                )
+                ck1_thickness_title = "CK-1 QMB relative thickness"
+                sample_thickness_title = "Sample QMB relative thickness"
+
             self._update_curve(
                 "ck1_thickness",
-                ck1.get("thickness_times", []),
-                ck1.get("thickness_data", []),
-                "CK-1 QMB thickness",
+                ck1_thickness_times,
+                ck1_thickness_values,
+                ck1_thickness_title,
                 "Å",
             )
             self._update_curve(
@@ -1513,9 +1635,9 @@ def run_phase_dashboard(spec: PhaseDashboardSpec) -> int:
             )
             self._update_curve(
                 "sample_thickness",
-                sample.get("thickness_times", []),
-                sample.get("thickness_data", []),
-                "Sample QMB thickness",
+                sample_thickness_times,
+                sample_thickness_values,
+                sample_thickness_title,
                 "Å",
             )
             self._update_curve(
@@ -1570,6 +1692,51 @@ def run_phase_dashboard(spec: PhaseDashboardSpec) -> int:
             )
 
             self._update_status(status)
+
+        def _update_shutter_reference(self, status: Status) -> None:
+            raw_timestamp = status.get("shutter_open_timestamp")
+            timestamp: float | None
+            try:
+                timestamp = float(raw_timestamp) if raw_timestamp is not None else None
+            except Exception:
+                timestamp = None
+            if timestamp is not None and not math.isfinite(timestamp):
+                timestamp = None
+
+            raw_close_timestamp = status.get("shutter_close_timestamp")
+            close_timestamp: float | None
+            try:
+                close_timestamp = (
+                    float(raw_close_timestamp) if raw_close_timestamp is not None else None
+                )
+            except Exception:
+                close_timestamp = None
+            if close_timestamp is not None and not math.isfinite(close_timestamp):
+                close_timestamp = None
+
+            self._shutter_open_timestamp = timestamp
+            self._shutter_close_timestamp = close_timestamp
+            self._relative_thickness_active = bool(
+                status.get("relative_thickness_active", timestamp is not None)
+            )
+            self._relative_thickness_baselines = {
+                "ck1": status.get("baseline_ck1_thickness"),
+                "sample": status.get("baseline_sample_thickness"),
+            }
+
+            for line in self._shutter_reference_lines.values():
+                if timestamp is None:
+                    line.setVisible(False)
+                else:
+                    line.setValue(timestamp)
+                    line.setVisible(True)
+
+            for line in self._shutter_close_reference_lines.values():
+                if close_timestamp is None:
+                    line.setVisible(False)
+                else:
+                    line.setValue(close_timestamp)
+                    line.setVisible(True)
 
         def _update_status(self, status: Status) -> None:
             phase = str(status.get("phase_label") or status.get("phase") or "STARTING")

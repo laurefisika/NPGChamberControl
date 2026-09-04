@@ -74,6 +74,12 @@ def validate_automation_mode(values: Mapping[str, Any]) -> dict[str, Any]:
             # Older modes may contain the removed historical ratio-comparison fields.
             migrated_values.pop("CALIBRATION_REFERENCE_RATIO", None)
             migrated_values.pop("CALIBRATION_RATIO_TOLERANCE_PERCENT", None)
+        if phase in {"heat", "dpdbba"}:
+            # Older modes may contain the retired fixed-step PID correction.
+            migrated_values.pop("PID_MAX_STEP_A", None)
+        if phase == "sputter":
+            # Older modes may contain the removed read-count stability setting.
+            migrated_values.pop("stable_temperature_reads", None)
         phases[phase] = validate_phase_values(phase, migrated_values)
     # Skipping Degas depends on the immediate history of one physical chamber
     # preparation. It is deliberately never persisted in a reusable recipe.

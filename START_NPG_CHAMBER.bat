@@ -4,14 +4,25 @@ setlocal EnableExtensions
 title NPG Chamber Controller
 cd /d "%~dp0"
 
-set "VENV_PY=.venv\Scripts\python.exe"
-set "SOURCE_BUILD=2026.08.11-r15"
+set "SOURCE_BUILD=2026.09.04-r20"
+rem Keep the Python runtime outside the project folder.  Qt/PySide6 contains
+rem deeply nested files and a project extracted under a long Windows path can
+rem otherwise exceed the Windows MAX_PATH limit during pip installation.
+if defined LOCALAPPDATA (
+    set "RUNTIME_BASE=%LOCALAPPDATA%\NPGChamber"
+) else (
+    set "RUNTIME_BASE=%TEMP%\NPGChamber"
+)
+set "RUNTIME_DIR=%RUNTIME_BASE%\runtime_%SOURCE_BUILD%"
+set "VENV_DIR=%RUNTIME_DIR%\.venv"
+set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 
 echo.
 echo ============================================================
 echo  NPG Chamber Controller
 echo ============================================================
 echo Project folder: %CD%
+echo Runtime folder: %VENV_DIR%
 echo Source build: %SOURCE_BUILD%
 echo.
 
@@ -23,9 +34,9 @@ rem ---------------------------------------------------------------------------
 if exist "%VENV_PY%" (
     "%VENV_PY%" -c "import sys" >nul 2>&1
     if not errorlevel 1 goto check_dependencies
-    echo Existing .venv cannot start and will be rebuilt.
-    rmdir /s /q ".venv"
-    if exist ".venv" goto remove_error
+    echo Existing runtime cannot start and will be rebuilt.
+    rmdir /s /q "%VENV_DIR%"
+    if exist "%VENV_DIR%" goto remove_error
 )
 
 goto create_runtime
@@ -60,13 +71,16 @@ where python >nul 2>&1
 if errorlevel 1 goto python_error
 
 echo Preparing the local runtime for first use ...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=Get-Item -LiteralPath '%CD%'; $free=$d.PSDrive.Free; if($free -lt 734003200){Write-Host ('ERROR: Less than 700 MB is free on drive '+$d.PSDrive.Name+'. Free disk space before creating .venv.'); exit 9}"
+if not exist "%RUNTIME_DIR%" mkdir "%RUNTIME_DIR%"
+if errorlevel 1 goto runtime_folder_error
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Get-Item -LiteralPath '%RUNTIME_DIR%'; $free=$p.PSDrive.Free; if($free -lt 734003200){Write-Host ('ERROR: Less than 700 MB is free on drive '+$p.PSDrive.Name+'. Free disk space before creating the runtime.'); exit 9}"
 if errorlevel 1 goto disk_error
 
 python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>&1
 if errorlevel 1 goto python_version_error
 
-python -m venv .venv
+python -m venv "%VENV_DIR%"
 if errorlevel 1 goto venv_error
 
 echo Installing NPG Chamber dependencies once ...
@@ -80,7 +94,6 @@ goto check_runtime
 if errorlevel 1 goto runtime_error
 
 goto verify_source
-
 
 :verify_source
 echo Verifying active source files ...
@@ -127,27 +140,38 @@ exit /b 1
 
 :disk_error
 echo.
-echo Runtime setup stopped because the project drive has too little free space.
+echo Runtime setup stopped because the runtime drive has too little free space.
 echo Free at least 700 MB and run START_NPG_CHAMBER.bat again.
+pause
+exit /b 1
+
+:runtime_folder_error
+echo.
+echo ERROR: Could not create the short runtime folder:
+echo %RUNTIME_DIR%
+echo Check your Windows user permissions and try again.
 pause
 exit /b 1
 
 :remove_error
 echo.
-echo ERROR: Could not remove the unusable local .venv.
+echo ERROR: Could not remove the unusable runtime at:
+echo %VENV_DIR%
 echo Close all NPG Chamber and Python windows, then try again.
 pause
 exit /b 1
 
 :venv_error
 echo.
-echo ERROR: Could not create the local virtual environment with "python -m venv".
+echo ERROR: Could not create the Python virtual environment at:
+echo %VENV_DIR%
 pause
 exit /b 1
 
 :install_error
 echo.
 echo ERROR: Local runtime installation/repair failed.
+echo Runtime folder: %VENV_DIR%
 echo Check disk space and internet access, then run this launcher again.
 pause
 exit /b 1
@@ -157,6 +181,6 @@ echo.
 echo ERROR: The local runtime could not be verified after repair.
 echo The launcher checks package availability only; it does not initialize WinForms/.NET here.
 if exist "%VENV_PY%" "%VENV_PY%" -c "import importlib.util as u; mods=('serial','matplotlib','requests','webview','clr','PySide6','pyqtgraph'); missing=[m for m in mods if u.find_spec(m) is None]; print('Missing Python modules: ' + (', '.join(missing) if missing else 'none detected'))" 2>nul
-echo Check the detailed pip output above. Deleting .venv is not normally required.
+echo Check the detailed pip output above. Deleting the runtime is not normally required.
 pause
 exit /b 1
