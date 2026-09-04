@@ -2,8 +2,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PHASE_01 = ROOT / "npg_chamber" / "legacy_scripts" / "01_heat_up_calibration_legacy.py"
-PHASE_03 = ROOT / "npg_chamber" / "legacy_scripts" / "03_dp_dbba_evaporation_legacy.py"
+PHASE_01 = ROOT / "npg_chamber" / "phase_scripts" / "01_heat_up_calibration.py"
+PHASE_03 = ROOT / "npg_chamber" / "phase_scripts" / "03_dp_dbba_evaporation.py"
 STYLE_HELPER = ROOT / "npg_chamber" / "common" / "phase_dashboard_style.py"
 
 

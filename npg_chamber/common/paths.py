@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from importlib import resources
 from pathlib import Path
 
@@ -15,6 +17,13 @@ PHASE_DATA_FOLDERS: dict[str, str] = {
     "anneal": "NPG Annealing Data",
 }
 
+PHASE_RUN_LABELS: dict[str, str] = {
+    "heat": "Heat up + Calibration",
+    "sputter": "Sputtering-Annealing",
+    "dpdbba": "DP-DBBA Evaporation",
+    "anneal": "NPG Annealings",
+}
+
 
 def project_root() -> Path:
     """Return the project root when running from the source tree."""
@@ -22,11 +31,12 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def legacy_dir() -> Path:
+def phase_script_dir() -> Path:
     """Return the authoritative folder containing the four phase scripts."""
 
-    packaged_scripts = resources.files("npg_chamber.legacy_scripts")
+    packaged_scripts = resources.files("npg_chamber.phase_scripts")
     return Path(str(packaged_scripts))
+
 
 def data_samples_dir() -> Path:
     """Return the data folder used by all workflow runs.
@@ -59,8 +69,48 @@ def phase_data_dir(workflow_key: str) -> Path:
     return path
 
 
-def ensure_all_data_sample_folders() -> None:
-    """Create all standard data folders."""
+def safe_run_name(run_name: str, *, fallback: str = "Run") -> str:
+    """Return a compact run name that is safe in a Windows folder name."""
 
-    for key in PHASE_DATA_FOLDERS:
-        phase_data_dir(key)
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(run_name)).strip()
+    safe = re.sub(r"\s+", " ", safe).rstrip(" .")
+    return safe if safe and safe not in {".", ".."} else fallback
+
+
+def phase_run_folder_prefix(workflow_key: str, run_name: str) -> str:
+    """Return the shared phase/sample prefix used by every run-data folder."""
+
+    try:
+        phase_label = PHASE_RUN_LABELS[workflow_key]
+    except KeyError as exc:
+        valid = ", ".join(sorted(PHASE_RUN_LABELS))
+        raise ValueError(f"Unknown workflow {workflow_key!r}. Valid values: {valid}") from exc
+    return f"{phase_label} {safe_run_name(run_name)} data"
+
+
+def create_numbered_run_dir(
+    workflow_key: str,
+    run_name: str,
+    *,
+    parent: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Atomically reserve the next ``<phase> <sample> data NN`` directory.
+
+    Numbering always starts at ``00`` and uses at least two digits. Creating the
+    directory here prevents two near-simultaneous launches from selecting the
+    same run folder.
+    """
+
+    root = Path(parent) if parent is not None else phase_data_dir(workflow_key)
+    root.mkdir(parents=True, exist_ok=True)
+    prefix = phase_run_folder_prefix(workflow_key, run_name)
+
+    counter = 0
+    while True:
+        candidate = root / f"{prefix} {counter:02d}"
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            counter += 1
+            continue
+        return candidate

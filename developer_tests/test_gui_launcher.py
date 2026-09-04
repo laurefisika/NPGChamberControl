@@ -4,7 +4,7 @@ from pathlib import Path
 
 def test_gui_launcher_source_has_readme_button():
     text = Path("npg_chamber/gui_launcher.py").read_text(encoding="utf-8")
-    assert "READ ME" in text
+    assert 'text="README"' in text
     assert "open_readme" in text
 
 
@@ -15,7 +15,7 @@ def test_gui_launcher_has_requested_aesthetic_colors_and_inputs():
     assert '#8db7f5' in text  # phase 2 pastel blue
     assert '#f2d36b' in text  # phase 3 pastel yellow
     assert '#9bd8a5' in text  # phase 4 pastel green
-    assert '#86efac' in text  # READ ME green
+    assert '#86efac' in text  # README green
     assert '#ef4444' in text  # Close red
     assert 'Run name' in text
     assert 'Ratio source' in text
@@ -41,7 +41,7 @@ def test_gui_uses_light_background():
 
 def test_close_button_never_force_kills_running_phase():
     text = Path("npg_chamber/gui_launcher.py").read_text(encoding="utf-8")
-    runner = Path("npg_chamber/workflows/legacy_runner.py").read_text(encoding="utf-8")
+    runner = Path("npg_chamber/workflows/runner.py").read_text(encoding="utf-8")
     assert "command=self.request_close" in text
     assert 'self.root.protocol("WM_DELETE_WINDOW", self.request_close)' in text
     assert "Launcher close blocked while a phase is active" in text

@@ -1,7 +1,7 @@
 """RKC-style oven PID serial controller.
 
 This module centralizes the PID communication code that was duplicated across
-several legacy scripts. It keeps the same protocol used in the working scripts:
+the packaged phase scripts. It keeps the same protocol used by the controller:
 
 - read identifiers with: ``EOT + address + identifier + ENQ``
 - write setpoint S1 with: ``EOT + address + STX + identifier + data + ETX + BCC``
@@ -79,7 +79,7 @@ def parse_frame(raw: bytes) -> PIDFrame:
 
     Known single-byte responses are mapped to statuses: ``ACK``, ``NAK`` and
     ``EOT``. Data frames are expected as ``STX + IDENT(2) + DATA + ETX + BCC``.
-    The BCC byte is not currently validated because the legacy scripts did not
+    The BCC byte is not currently validated because the controller does not
     validate it either; the parser keeps the same behaviour for compatibility.
     """
 

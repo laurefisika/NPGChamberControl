@@ -12,7 +12,7 @@ def test_phase2_abort_pid_default_is_zero() -> None:
     defaults = all_default_values()["sputter"]
     assert defaults["abort_reset_c"] == 0.0
 
-    phase2 = (PROJECT_ROOT / "npg_chamber/legacy_scripts/02_sputtering_annealing_legacy.py").read_text(
+    phase2 = (PROJECT_ROOT / "npg_chamber/phase_scripts/02_sputtering_annealing.py").read_text(
         encoding="utf-8"
     )
     assert "abort_reset_c: float = 0.0" in phase2
@@ -25,7 +25,7 @@ def test_phase4_finishes_after_ten_minutes_at_cooldown_target() -> None:
     assert defaults["POST_COOLDOWN_WAIT_S"] == 10 * 60
     assert "FINAL_VENT_TARGET_C" not in {spec.key for spec in specs_for_phase("anneal")}
 
-    phase4 = (PROJECT_ROOT / "npg_chamber/legacy_scripts/04_npg_annealings_legacy.py").read_text(
+    phase4 = (PROJECT_ROOT / "npg_chamber/phase_scripts/04_npg_annealings.py").read_text(
         encoding="utf-8"
     )
     assert "pid.set_setpoint_c(COOLDOWN_TARGET_C)" in phase4
@@ -40,7 +40,7 @@ def test_phase4_finishes_after_ten_minutes_at_cooldown_target() -> None:
 
 
 def test_phase4_abort_uses_cooldown_target_and_sequence_is_lower() -> None:
-    phase4 = (PROJECT_ROOT / "npg_chamber/legacy_scripts/04_npg_annealings_legacy.py").read_text(
+    phase4 = (PROJECT_ROOT / "npg_chamber/phase_scripts/04_npg_annealings.py").read_text(
         encoding="utf-8"
     )
     assert "self.pid.set_setpoint_c_best_effort(COOLDOWN_TARGET_C)" in phase4

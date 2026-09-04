@@ -1,12 +1,20 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite it using the metadata below."
-title: "NPG Chamber Control"
+message: "If you use or discuss this software, please cite the project and its documentation."
+title: "NPG Chamber Controller"
 type: software
-version: 0.9.36
-date-released: 2026-08-11
+version: 0.9.41
+date-released: 2026-09-04
+repository-code: "https://github.com/laurefisika/NPGChamberControl"
+url: "https://github.com/laurefisika/NPGChamberControl"
 authors:
   - given-names: Laura
     family-names: "Rodríguez Jordán"
 abstract: >-
   Python control and operator-guided automation software for a four-phase
-  ultra-high-vacuum nanoporous graphene synthesis workflow.
+  ultra-high-vacuum nanoporous graphene synthesis workflow at ICN2.
+keywords:
+  - nanoporous graphene
+  - vacuum chamber control
+  - thin-film synthesis
+  - experimental automation
+  - Python

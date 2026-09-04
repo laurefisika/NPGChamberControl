@@ -1,21 +1,20 @@
 """Packaged entry point for Heat up + Calibration.
 
-This module deliberately launches the frozen script stored in
-``npg_chamber.legacy_scripts`` so ``npg-chamber --run heat`` uses the exact
-final source file supplied for packaging. The shared device modules remain in
-``npg_chamber.devices`` for diagnostics and future refactoring, while this entry
-point preserves the current experimental scripts byte-for-byte.
+This module delegates to the authoritative phase script stored in
+``npg_chamber.phase_scripts`` so ``npg-chamber --run heat`` uses the exact
+source file supplied for packaging. The shared device modules remain in
+``npg_chamber.devices`` for diagnostics and reusable hardware helpers.
 """
 
 from __future__ import annotations
 
-from npg_chamber.workflows.legacy_runner import run_legacy_workflow
+from npg_chamber.workflows.runner import run_workflow
 
 
 def run_heat_calibration() -> int:
     """Run the exact packaged Heat up + Calibration script."""
 
-    return run_legacy_workflow("heat")
+    return run_workflow("heat")
 
 
 def main() -> int:

@@ -1,8 +1,8 @@
 """Local source/runtime verification for the Windows launcher.
 
 This module intentionally performs text-level checks instead of importing the
-legacy phase scripts, because importing those scripts may initialize hardware
-state. It is safe to run before the graphical launcher opens.
+phase scripts, because importing them may initialize hardware state. It is safe
+to run before the graphical launcher opens.
 """
 from __future__ import annotations
 
@@ -23,15 +23,25 @@ class Check:
 CHECKS: tuple[Check, ...] = (
     Check(
         "Phase 01 control hotfix",
-        "npg_chamber/legacy_scripts/01_heat_up_calibration_legacy.py",
+        "npg_chamber/phase_scripts/01_heat_up_calibration.py",
         (
             "TEMP_SLOPE_WINDOW_S = 45.0",
             "TEMP_SLOPE_MIN_SPAN_S = 20.0",
         ),
     ),
     Check(
+        "Phase 01 stable calibration endpoint",
+        "npg_chamber/phase_scripts/01_heat_up_calibration.py",
+        (
+            "CALIBRATION_TARGET_SAMPLE_A = 2.0",
+            "CALIBRATION_TARGET_STABLE_S = 5.0",
+            "calibration_target_stable_tracker.update(",
+            "Stable-endpoint thickness ratio",
+        ),
+    ),
+    Check(
         "Phase 01 minimal shutter gate",
-        "npg_chamber/legacy_scripts/01_heat_up_calibration_legacy.py",
+        "npg_chamber/phase_scripts/01_heat_up_calibration.py",
         (
             "and float(ck1_temp) >= float(target_temp)",
             "and float(ck1_rate_avg) >= float(target_rate)",
@@ -40,7 +50,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         "Phase 03 minimal shutter gate",
-        "npg_chamber/legacy_scripts/03_dp_dbba_evaporation_legacy.py",
+        "npg_chamber/phase_scripts/03_dp_dbba_evaporation.py",
         (
             "if not oven_ready_for_evaporation():",
             "and float(ck1_temp) >= float(target_temp)",
@@ -57,7 +67,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         "Phase 01 local Abort / Finish semantics",
-        "npg_chamber/legacy_scripts/01_heat_up_calibration_legacy.py",
+        "npg_chamber/phase_scripts/01_heat_up_calibration.py",
         (
             "GUI Abort button - immediate phase stop",
             "Safety action first. Do not delay OUTPUT OFF behind snapshots or file I/O.",
@@ -66,7 +76,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         "Phase 03 local Abort / Finish handoff semantics",
-        "npg_chamber/legacy_scripts/03_dp_dbba_evaporation_legacy.py",
+        "npg_chamber/phase_scripts/03_dp_dbba_evaporation.py",
         (
             "GUI Abort button - immediate phase stop",
             "Keysight is already OFF, but Oven PID 0.0 °C could not be",
@@ -98,6 +108,11 @@ CHECKS: tuple[Check, ...] = (
             'def _mark_target_edit_dirty',
             'def _set_target_if_clean',
             'self._acknowledge_pending_targets(targets)',
+            'self._shutter_reference_lines',
+            'self._shutter_close_reference_lines',
+            'value_axis.setWidth(104)',
+            'def relative_thickness_series',
+            'CK-1 QMB relative thickness',
             "splitter.setSizes([1310, 540])",
         ),
     ),
@@ -112,18 +127,21 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         "Phase 02 COSCON activation recovery",
-        "npg_chamber/legacy_scripts/02_sputtering_annealing_legacy.py",
+        "npg_chamber/phase_scripts/02_sputtering_annealing.py",
         (
             "coscon_activation_overload_retries: int = 1",
             "coscon_activation_recovery_wait_s: float = 8.0",
+            "coscon_activation_reset_retries: int = 1",
             "def _is_recoverable_activation_overload",
             "def _recover_activation_overload",
+            "def _recover_activation_overload_with_reset",
+            'self.coscon.send("Reset")',
             "COSCON HV-Module Energy Overload repeated during activation",
         ),
     ),
     Check(
         "Phase 04 automatic finalization",
-        "npg_chamber/legacy_scripts/04_npg_annealings_legacy.py",
+        "npg_chamber/phase_scripts/04_npg_annealings.py",
         (
             "POST_COOLDOWN_WAIT_S = 10 * 60",
             "AUTO_CLOSE_WHEN_LAUNCHED_FROM_UNIFIED",

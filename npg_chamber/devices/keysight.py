@@ -1,7 +1,7 @@
 """Keysight E3632A power supply helper.
 
 This module centralises the small SCPI operations that were repeated across the
-legacy chamber scripts.  It intentionally keeps the same simple command style as
+the chamber phase scripts. It intentionally keeps the same simple command style as
 those scripts: commands are sent as text lines terminated by ``\n`` and queries
 are read with ``readline()``.
 """
@@ -108,7 +108,7 @@ class KeysightE3632A:
         self.close()
 
     def write(self, command: str, delay_s: float = 0.10) -> None:
-        """Write a SCPI command using the legacy line-ending convention."""
+        """Write a SCPI command using the controller line-ending convention."""
 
         with self.lock:
             self.ser.write((command + "\n").encode())
@@ -139,12 +139,12 @@ class KeysightE3632A:
         return bool(int(value))
 
     # ------------------------------------------------------------------
-    # Readback helpers matching legacy behaviour
+    # Readback helpers matching controller behaviour
     # ------------------------------------------------------------------
     def read_voltage_current(self) -> VoltageCurrentReadback:
         """Read measured voltage and current.
 
-        This follows the simple Sputtering-Annealing legacy pattern: enter remote
+        This follows the simple Sputtering-Annealing pattern: enter remote
         mode, query voltage, query current, and return local mode.
         """
 
@@ -164,7 +164,7 @@ class KeysightE3632A:
         )
 
     # ------------------------------------------------------------------
-    # Command helpers used by the legacy workflows
+    # Command helpers used by the packaged workflows
     # ------------------------------------------------------------------
     def set_remote(self) -> None:
         self.write("SYST:REM")
@@ -202,7 +202,7 @@ class KeysightE3632A:
     def set_current(self, current_a: float, *, max_current_a: float | None = None) -> float:
         """Set current and return the commanded value.
 
-        Passing ``max_current_a`` reproduces the legacy soft-cap behaviour while
+        Passing ``max_current_a`` applies the established soft-cap behaviour while
         keeping the cap visible at the call site.
         """
 
@@ -234,7 +234,7 @@ class KeysightE3632A:
             self.clear_current_protection()
 
     def force_zero_output(self) -> None:
-        """Set current to 0 A and switch output off, mirroring legacy shutdowns."""
+        """Set current to 0 A and switch output off for a safe shutdown."""
 
         self.set_current(0.0)
         self.output_off()

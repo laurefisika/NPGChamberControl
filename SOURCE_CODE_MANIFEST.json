@@ -1,26 +1,26 @@
 [
   {
     "workflow_key": "heat",
-    "packaged_resource": "npg_chamber/legacy_scripts/01_heat_up_calibration_legacy.py",
-    "sha256": "b41af102bef5952198bdb25022b7ea69c0b95eb86bf05bea430d75958b14d838",
-    "size_bytes": 220514
+    "packaged_resource": "npg_chamber/phase_scripts/01_heat_up_calibration.py",
+    "sha256": "44db2ad51ea2c4153d284d44f78524bb8b3e44ef3c3f41d791a6a2ae9211de1b",
+    "size_bytes": 229469
   },
   {
     "workflow_key": "sputter",
-    "packaged_resource": "npg_chamber/legacy_scripts/02_sputtering_annealing_legacy.py",
-    "sha256": "eff875e56aaebd786ccc348b0b57093881c086f6f29cf1f211564c5bbbeee84d",
-    "size_bytes": 116791
+    "packaged_resource": "npg_chamber/phase_scripts/02_sputtering_annealing.py",
+    "sha256": "f60b6d816ad25bf653bf835813d34ea10c569233e6ce9367c01b5a71b29b9cf4",
+    "size_bytes": 138358
   },
   {
     "workflow_key": "dpdbba",
-    "packaged_resource": "npg_chamber/legacy_scripts/03_dp_dbba_evaporation_legacy.py",
-    "sha256": "ce54136b63359420828bd2831da8d0ed48f57bc71aa92c28bffdecf2d33b6834",
-    "size_bytes": 233642
+    "packaged_resource": "npg_chamber/phase_scripts/03_dp_dbba_evaporation.py",
+    "sha256": "6bfadebb11748fda66d85db103748f336b72b2676eb7c501285cfc7751f8d656",
+    "size_bytes": 238326
   },
   {
     "workflow_key": "anneal",
-    "packaged_resource": "npg_chamber/legacy_scripts/04_npg_annealings_legacy.py",
-    "sha256": "21862f656fe77e2f27f841d657ef96c0aa0214fc3257fc8dcb973a0dab690025",
-    "size_bytes": 89557
+    "packaged_resource": "npg_chamber/phase_scripts/04_npg_annealings.py",
+    "sha256": "f1ceeb98f7640b84b6dd359d1559b779f2600c79e9c954a899de7ae0f50b2e39",
+    "size_bytes": 89353
   }
 ]

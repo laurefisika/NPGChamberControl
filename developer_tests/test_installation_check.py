@@ -10,12 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_installation_check_passes_current_tree() -> None:
-    assert installation_check.verify("2026.08.11-r15") is True
+    assert installation_check.verify("2026.09.04-r20") is True
 
 
 def test_installation_check_cli_passes_without_importing_phase_scripts() -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "npg_chamber.installation_check", "--expected-build", "2026.08.11-r15"],
+        [sys.executable, "-m", "npg_chamber.installation_check", "--expected-build", "2026.09.04-r20"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -31,4 +31,4 @@ def test_batch_launcher_uses_dedicated_verifier_not_inline_source_literals() -> 
     assert '-m npg_chamber.installation_check --expected-build "%SOURCE_BUILD%"' in text
     assert 'TEMP_SLOPE_WINDOW_S = 45.0' not in text
     assert 'apply_mode_button.clicked.connect(self._apply_feedback_mode)' not in text
-    assert 'SOURCE_BUILD=2026.08.11-r15' in text
+    assert 'SOURCE_BUILD=2026.09.04-r20' in text

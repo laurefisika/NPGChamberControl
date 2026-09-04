@@ -47,11 +47,9 @@ def summarize(path: Path) -> dict:
         raise ValueError("The control-decision CSV contains no data rows.")
 
     estimated_rate = values(rows, "estimated_rate_a_per_s")
-    target_rate = values(rows, "rate_target_a_per_s")
     temperature = values(rows, "control_temperature_c")
     active_target = values(rows, "active_temperature_target_c")
     current = values(rows, "current_after_a")
-    errors = values(rows, "error")
     applied = values(rows, "applied_delta")
 
     rate_errors = []

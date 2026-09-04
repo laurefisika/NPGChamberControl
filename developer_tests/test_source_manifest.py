@@ -36,4 +36,4 @@ def test_workflow_entry_points_delegate_only_to_packaged_runtime_scripts() -> No
     ]
     for name in workflow_files:
         text = (PROJECT_ROOT / "npg_chamber" / "workflows" / name).read_text(encoding="utf-8")
-        assert "run_legacy_workflow" in text
+        assert "run_workflow" in text

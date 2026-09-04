@@ -7,10 +7,10 @@ import sys
 
 from npg_chamber import __version__
 from npg_chamber.common.logging import banner, init_colors
-from npg_chamber.workflows.legacy_runner import (
-    LEGACY_WORKFLOWS,
+from npg_chamber.workflows.runner import (
+    WORKFLOWS,
     list_workflows,
-    run_legacy_workflow,
+    run_workflow,
 )
 
 
@@ -26,13 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="NPG synthesis chamber controller")
     parser.add_argument(
         "--run",
-        choices=sorted(LEGACY_WORKFLOWS),
-        help="Run one migrated workflow directly without showing the menu.",
-    )
-    parser.add_argument(
-        "--run-legacy",
-        choices=sorted(LEGACY_WORKFLOWS),
-        help="Run one frozen legacy script directly as a fallback.",
+        choices=sorted(WORKFLOWS),
+        help="Run one packaged phase directly without showing the menu.",
     )
     parser.add_argument(
         "--list",
@@ -78,9 +73,6 @@ def main(argv: list[str] | None = None) -> int:
         print(list_workflows())
         return 0
 
-    if args.run_legacy:
-        return run_legacy_workflow(args.run_legacy)
-
     if args.run:
         workflow_key = args.run
     elif args.text_menu:
@@ -98,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Bye.")
         return 0
 
-    if workflow_key not in LEGACY_WORKFLOWS:
+    if workflow_key not in WORKFLOWS:
         print("Invalid option. Use --list to see available workflows.")
         return 2
 
@@ -122,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_npg_annealing()
 
-    return run_legacy_workflow(workflow_key)
+    return run_workflow(workflow_key)
 
 
 if __name__ == "__main__":

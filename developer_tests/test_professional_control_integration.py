@@ -5,10 +5,10 @@ from pathlib import Path
 from npg_chamber.config.run_parameters import defaults_for_phase
 
 ROOT = Path(__file__).resolve().parents[1]
-PHASE1 = ROOT / "npg_chamber/legacy_scripts/01_heat_up_calibration_legacy.py"
-PHASE2 = ROOT / "npg_chamber/legacy_scripts/02_sputtering_annealing_legacy.py"
-PHASE3 = ROOT / "npg_chamber/legacy_scripts/03_dp_dbba_evaporation_legacy.py"
-PHASE4 = ROOT / "npg_chamber/legacy_scripts/04_npg_annealings_legacy.py"
+PHASE1 = ROOT / "npg_chamber/phase_scripts/01_heat_up_calibration.py"
+PHASE2 = ROOT / "npg_chamber/phase_scripts/02_sputtering_annealing.py"
+PHASE3 = ROOT / "npg_chamber/phase_scripts/03_dp_dbba_evaporation.py"
+PHASE4 = ROOT / "npg_chamber/phase_scripts/04_npg_annealings.py"
 
 
 def test_phase13_compound_is_true_cascade() -> None:
@@ -114,15 +114,25 @@ def test_qmb_outlier_guard_precedes_control_and_is_audited() -> None:
         assert "data_quality_event_log:" in source
 
 
-def test_phase1_calibration_uses_exact_crossing_and_quality_checks() -> None:
+def test_phase1_calibration_uses_stable_endpoint_and_keeps_crossing_audit() -> None:
     source = PHASE1.read_text(encoding="utf-8")
-    assert "def calculate_calibration_result():" in source
+    assert "CALIBRATION_TARGET_SAMPLE_A = 2.0" in source
+    assert "PID_TEMP_BAND_C = 0.7" in source
+    assert "CALIBRATION_TARGET_STABLE_S = 5.0" in source
+    assert "calibration_target_stable_tracker = StableConditionTracker" in source
+    assert "calibration_target_stable_tracker.update(" in source
+    assert "def calculate_calibration_result(sample_rel=None, ck1_rel=None, confirmation_timestamp=None):" in source
+    assert "endpoint_ratio = float(ck1_rel) / float(sample_rel)" in source
+    assert "Stable-endpoint thickness ratio" in source
+    # The exact-crossing helper remains as an audit/linearity diagnostic only.
     assert "exact_calibration_ratio(" in source
     common = (ROOT / "npg_chamber/common/professional_control.py").read_text(encoding="utf-8")
     assert "crossing_time_s" in common
     assert "def exact_calibration_ratio(" in common
     assert "CALIBRATION_MIN_LINEAR_R2" in source
     defaults = defaults_for_phase("heat")
+    assert defaults["CALIBRATION_TARGET_SAMPLE_A"] == 2.0
+    assert defaults["PID_TEMP_BAND_C"] == 0.7
     assert defaults["CALIBRATION_MIN_LINEAR_R2"] == 0.985
     assert len([key for key in defaults if key.startswith("CALIBRATION_")]) == 2
 
@@ -147,4 +157,3 @@ def test_pre_refill_manual_runs_add_inner_loop_qualification_and_propagation_hol
         assert defaults["CASCADE_INNER_MAX_ABS_TEMP_SLOPE_C_PER_MIN"] == 0.30
         assert defaults["CASCADE_INNER_READY_STABLE_DURATION_S"] == 60.0
         assert defaults["CASCADE_THERMAL_RESPONSE_MAX_HOLD_S"] == 420.0
-

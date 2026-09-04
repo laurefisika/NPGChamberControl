@@ -5,9 +5,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_build_identity_is_visible_and_source_guard_exists():
     init_text = (ROOT / "npg_chamber" / "__init__.py").read_text(encoding="utf-8")
-    runner = (ROOT / "npg_chamber" / "workflows" / "legacy_runner.py").read_text(encoding="utf-8")
+    runner = (ROOT / "npg_chamber" / "workflows" / "runner.py").read_text(encoding="utf-8")
     launcher = (ROOT / "START_NPG_CHAMBER.bat").read_text(encoding="utf-8")
-    assert '__build__ = "2026.08.11-r15"' in init_text
+    assert '__build__ = "2026.09.04-r20"' in init_text
     assert "Software build: v{__version__} ({__build__})" in runner
     assert "Source build: %SOURCE_BUILD%" in launcher
     assert "goto source_mismatch" in launcher
@@ -64,13 +64,14 @@ def test_phase13_adaptive_live_fit_and_temperature_switch_rescale() -> None:
     assert "def _apply_adaptive_live_fit" in text
     assert "desired_span < 0.62 * old_span" in text
     assert "force_autoscale=temperature_view_changed" in text
-    assert 'plot.setXRange(min(xs), max(xs), padding=0.015)' in text
+    assert 'plot.setXRange(x_low, x_high, padding=0.015)' in text
+    assert 'marker = self._shutter_open_timestamp' in text
 
 
 def test_all_phase_guis_share_base_visual_vocabulary() -> None:
     qt = (ROOT / "npg_chamber" / "common" / "qt_phase_dashboard.py").read_text(encoding="utf-8")
-    phase2 = (ROOT / "npg_chamber" / "legacy_scripts" / "02_sputtering_annealing_legacy.py").read_text(encoding="utf-8")
-    phase4 = (ROOT / "npg_chamber" / "legacy_scripts" / "04_npg_annealings_legacy.py").read_text(encoding="utf-8")
+    phase2 = (ROOT / "npg_chamber" / "phase_scripts" / "02_sputtering_annealing.py").read_text(encoding="utf-8")
+    phase4 = (ROOT / "npg_chamber" / "phase_scripts" / "04_npg_annealings.py").read_text(encoding="utf-8")
     for token in ("#eef2f7", "#ffffff", "#dbe3ec", "#0f172a", "#64748b"):
         assert token in qt
         assert token in phase2

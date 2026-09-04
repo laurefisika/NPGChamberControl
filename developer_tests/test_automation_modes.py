@@ -65,33 +65,52 @@ def test_skip_degas_is_never_persisted_in_reusable_automation_modes(
     assert loaded["phases"]["sputter"]["start_without_degassing"] is False
 
 
-def test_legacy_phase4_final_target_is_migrated(tmp_path: Path, monkeypatch) -> None:
+def test_historical_phase4_final_target_is_migrated(tmp_path: Path, monkeypatch) -> None:
     store = tmp_path / "automation_modes.json"
     monkeypatch.setattr(automation_modes, "mode_store_path", lambda: store)
 
-    legacy = _mode("Legacy v13 recipe")
-    legacy["phases"]["anneal"]["FINAL_VENT_TARGET_C"] = 30.0
+    historical = _mode("Historical v13 recipe")
+    historical["phases"]["anneal"]["FINAL_VENT_TARGET_C"] = 30.0
     store.write_text(
-        __import__("json").dumps({"version": 1, "modes": {"Legacy": legacy}}),
+        __import__("json").dumps({"version": 1, "modes": {"Historical": historical}}),
         encoding="utf-8",
     )
 
-    loaded = automation_modes.load_automation_modes()["Legacy"]
+    loaded = automation_modes.load_automation_modes()["Historical"]
     assert "FINAL_VENT_TARGET_C" not in loaded["phases"]["anneal"]
     assert loaded["phases"]["anneal"]["COOLDOWN_TARGET_C"] == 0.0
 
 
-def test_legacy_phase1_ratio_reference_fields_are_migrated(tmp_path: Path, monkeypatch) -> None:
+def test_historical_phase1_ratio_reference_fields_are_migrated(tmp_path: Path, monkeypatch) -> None:
     store = tmp_path / "automation_modes.json"
     monkeypatch.setattr(automation_modes, "mode_store_path", lambda: store)
 
-    legacy = _mode("Older calibration recipe")
-    legacy["phases"]["heat"]["CALIBRATION_REFERENCE_RATIO"] = 100.0
-    legacy["phases"]["heat"]["CALIBRATION_RATIO_TOLERANCE_PERCENT"] = 5.0
+    historical = _mode("Older calibration recipe")
+    historical["phases"]["heat"]["CALIBRATION_REFERENCE_RATIO"] = 100.0
+    historical["phases"]["heat"]["CALIBRATION_RATIO_TOLERANCE_PERCENT"] = 5.0
     store.write_text(
-        __import__("json").dumps({"version": 4, "modes": {"Legacy": legacy}}),
+        __import__("json").dumps({"version": 4, "modes": {"Historical": historical}}),
         encoding="utf-8",
     )
 
-    loaded = automation_modes.load_automation_modes()["Legacy"]
+    loaded = automation_modes.load_automation_modes()["Historical"]
     assert len([key for key in loaded["phases"]["heat"] if key.startswith("CALIBRATION_")]) == 2
+
+
+def test_historical_retired_parameter_fields_are_migrated(tmp_path: Path, monkeypatch) -> None:
+    store = tmp_path / "automation_modes.json"
+    monkeypatch.setattr(automation_modes, "mode_store_path", lambda: store)
+
+    historical = _mode("Pre-cleanup recipe")
+    historical["phases"]["heat"]["PID_MAX_STEP_A"] = 0.0025
+    historical["phases"]["dpdbba"]["PID_MAX_STEP_A"] = 0.0025
+    historical["phases"]["sputter"]["stable_temperature_reads"] = 3
+    store.write_text(
+        __import__("json").dumps({"version": 4, "modes": {"Historical": historical}}),
+        encoding="utf-8",
+    )
+
+    loaded = automation_modes.load_automation_modes()["Historical"]
+    assert "PID_MAX_STEP_A" not in loaded["phases"]["heat"]
+    assert "PID_MAX_STEP_A" not in loaded["phases"]["dpdbba"]
+    assert "stable_temperature_reads" not in loaded["phases"]["sputter"]

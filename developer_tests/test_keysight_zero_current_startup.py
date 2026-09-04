@@ -4,8 +4,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PHASES = (
-    ROOT / "npg_chamber/legacy_scripts/01_heat_up_calibration_legacy.py",
-    ROOT / "npg_chamber/legacy_scripts/03_dp_dbba_evaporation_legacy.py",
+    ROOT / "npg_chamber/phase_scripts/01_heat_up_calibration.py",
+    ROOT / "npg_chamber/phase_scripts/03_dp_dbba_evaporation.py",
 )
 
 

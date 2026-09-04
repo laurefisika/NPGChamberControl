@@ -4,9 +4,9 @@ from pathlib import Path
 
 
 PHASES = [
-    Path("npg_chamber/legacy_scripts/01_heat_up_calibration_legacy.py"),
-    Path("npg_chamber/legacy_scripts/03_dp_dbba_evaporation_legacy.py"),
-    Path("npg_chamber/legacy_scripts/04_npg_annealings_legacy.py"),
+    Path("npg_chamber/phase_scripts/01_heat_up_calibration.py"),
+    Path("npg_chamber/phase_scripts/03_dp_dbba_evaporation.py"),
+    Path("npg_chamber/phase_scripts/04_npg_annealings.py"),
 ]
 
 

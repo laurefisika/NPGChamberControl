@@ -1,8 +1,8 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-P1 = ROOT / "npg_chamber" / "legacy_scripts" / "01_heat_up_calibration_legacy.py"
-P3 = ROOT / "npg_chamber" / "legacy_scripts" / "03_dp_dbba_evaporation_legacy.py"
+P1 = ROOT / "npg_chamber" / "phase_scripts" / "01_heat_up_calibration.py"
+P3 = ROOT / "npg_chamber" / "phase_scripts" / "03_dp_dbba_evaporation.py"
 
 
 def _block(text: str, start: str, end: str) -> str:

@@ -2,7 +2,7 @@
 
 The chamber scripts use the same three QMB commands repeatedly:
 ``thickness``, ``rate`` and ``zero``. This module centralises the byte-frame
-construction and the simple response parsing used in the legacy scripts.
+construction and the simple response parsing used by the phase scripts.
 """
 
 from __future__ import annotations
@@ -56,9 +56,9 @@ COMMANDS = {kind: build_command(kind) for kind in SUBCOMMANDS}
 
 
 def parse_numeric_response(raw: bytes) -> Optional[float]:
-    """Parse a numeric QMB response using the legacy crop ``response[3:-3]``.
+    """Parse a numeric QMB response using the controller crop ``response[3:-3]``.
 
-    The legacy scripts crop the first three and last three bytes before calling
+    The phase scripts crop the first three and last three bytes before calling
     ``float(...)``. This function keeps that behaviour exactly for compatibility.
     """
 

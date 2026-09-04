@@ -45,19 +45,19 @@ def test_pyproject_version_matches_package_version():
     assert data["project"]["version"] == npg_chamber.__version__
 
 
-def test_legacy_scripts_are_packaged_resources():
-    legacy_root = resources.files("npg_chamber.legacy_scripts")
+def test_phase_scripts_are_packaged_resources():
+    phase_root = resources.files("npg_chamber.phase_scripts")
     expected = [
-        "01_heat_up_calibration_legacy.py",
-        "02_sputtering_annealing_legacy.py",
-        "03_dp_dbba_evaporation_legacy.py",
-        "04_npg_annealings_legacy.py",
+        "01_heat_up_calibration.py",
+        "02_sputtering_annealing.py",
+        "03_dp_dbba_evaporation.py",
+        "04_npg_annealings.py",
     ]
     for name in expected:
-        assert (legacy_root / name).is_file()
+        assert (phase_root / name).is_file()
 
 
-def test_cli_help_mentions_legacy_fallback():
+def test_cli_help_exposes_direct_phase_execution():
     completed = subprocess.run(
         [sys.executable, "-m", "npg_chamber", "--help"],
         text=True,
@@ -65,7 +65,8 @@ def test_cli_help_mentions_legacy_fallback():
         check=False,
     )
     assert completed.returncode == 0
-    assert "--run-legacy" in completed.stdout
+    assert "--run" in completed.stdout
+    assert "--run-legacy" not in completed.stdout
 
 
 def test_cli_help_mentions_text_menu():
