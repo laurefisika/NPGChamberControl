@@ -20,12 +20,7 @@ interlocks or instrument maintenance.
 This controller was developed during an internship at the Catalan Institute of
 Nanoscience and Nanotechnology (ICN2) for the NPG synthesis chamber. The
 software repository contains the maintained source tree, phase explanations,
-tests and Windows launcher. The wider internship documentation is kept
-separately in the public
-[`Internship-ICN2`](https://github.com/laurefisika/Internship-ICN2) repository.
-
-- [Laboratory synthesis-chamber SOP (PDF)](https://github.com/laurefisika/Internship-ICN2/blob/main/Synthesis_chamber_SOP.pdf)
-- [Internship repository](https://github.com/laurefisika/Internship-ICN2)
+tests and Windows launcher.
 
 ## Acknowledgements
 
