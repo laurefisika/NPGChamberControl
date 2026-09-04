@@ -24,8 +24,8 @@ tests and Windows launcher.
 
 ## Acknowledgements
 
-The author gratefully acknowledges the scientific supervision, training and
-practical guidance provided by the internship tutor represented by
+I gratefully acknowledge the scientific supervision, training and
+practical guidance provided by my internship tutor represented by
 [`Cj111gh`](https://github.com/Cj111gh/).
 
 ## Publication status
