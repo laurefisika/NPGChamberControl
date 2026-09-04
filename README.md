@@ -12,13 +12,12 @@ Software release for the ICN2 NPG synthesis chamber.
 
 This README is the software Standard Operating Procedure. It explains how to
 start, supervise and verify the controller. It does not replace the laboratory
-SOP for chamber preparation, gas handling, cooling water, vacuum hardware,
-interlocks or instrument maintenance.
+SOP for the chamber use.
 
 ## Project context
 
 This controller was developed during an internship at the Catalan Institute of
-Nanoscience and Nanotechnology (ICN2) for the NPG synthesis chamber. The
+Nanoscience and Nanotechnology (ICN2) in the Atomic Manipulation and Spectroscopy Group for the NPG synthesis chamber. The
 software repository contains the maintained source tree, phase explanations,
 tests and Windows launcher.
 
@@ -28,7 +27,7 @@ tests and Windows launcher.
 - **Original base code:** Roger Simon de Febrer.
 - **Scientific supervision and training:** Piotr Krzysztof Ciochon ([Cj111gh](https://github.com/Cj111gh/)).
 
-The author gratefully acknowledges the supervision, training and practical
+I gratefully acknowledge the supervision, training and practical
 guidance provided throughout the ICN2 internship.
 
 ## Publication status
