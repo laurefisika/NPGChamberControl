@@ -43,9 +43,8 @@ the handover history remains useful at the chamber.
   are no longer present in the current tree.
 - Added GitHub contribution guidance, issue and pull-request templates, a
   hardware-independent continuous-integration workflow and citation metadata.
-- Added links to the public internship SOP and an acknowledgement link to the
-  tutor's GitHub profile without assigning software authorship beyond the
-  project's stated credits.
+- Added explicit project credits and linked the tutor's GitHub profile without
+  assigning software authorship beyond the project's stated credits.
 
 ## 0.9.40 - build 2026.08.21-r19 - COSCON recovery and plot references
 
