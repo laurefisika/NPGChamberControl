@@ -22,11 +22,14 @@ Nanoscience and Nanotechnology (ICN2) for the NPG synthesis chamber. The
 software repository contains the maintained source tree, phase explanations,
 tests and Windows launcher.
 
-## Acknowledgements
+## Credits and acknowledgements
 
-I gratefully acknowledge the scientific supervision, training and
-practical guidance provided by my internship tutor represented by
-[`Cj111gh`](https://github.com/Cj111gh/).
+- **Project development and documentation:** Laura Rodríguez Jordán.
+- **Original base code:** Roger Simon de Febrer.
+- **Scientific supervision and training:** Piotr Krzysztof Ciochon ([Cj111gh](https://github.com/Cj111gh/)).
+
+The author gratefully acknowledges the supervision, training and practical
+guidance provided throughout the ICN2 internship.
 
 ## Publication status
 
